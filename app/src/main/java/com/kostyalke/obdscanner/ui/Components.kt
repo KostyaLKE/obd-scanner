@@ -86,7 +86,10 @@ fun StatusNote(
     compact: Boolean = false,
 ) {
     Surface(modifier = modifier.fillMaxWidth(), shape = PanelShape, color = tone.container) {
-        Row(Modifier.padding(horizontal = 14.dp, vertical = if (compact) 10.dp else 14.dp)) {
+        Row(
+            Modifier.padding(horizontal = 14.dp, vertical = if (compact) 10.dp else 14.dp),
+            verticalAlignment = if (body == null) Alignment.CenterVertically else Alignment.Top,
+        ) {
             Icon(icon, contentDescription = null, tint = tone.accent, modifier = Modifier.size(if (compact) 18.dp else 20.dp))
             Spacer(Modifier.width(12.dp))
             Column {

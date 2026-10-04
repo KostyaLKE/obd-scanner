@@ -2,7 +2,10 @@ package com.kostyalke.obdscanner.ui
 
 import android.Manifest
 import android.bluetooth.BluetoothAdapter
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.os.Build
 import android.provider.Settings
@@ -33,6 +36,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -61,13 +65,28 @@ fun ConnectScreen(vm: AppViewModel, state: ConnState) {
     val permLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted = it }
     val enableBt = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { refresh++ }
     LaunchedEffect(Unit) { if (!granted && perm != null) permLauncher.launch(perm) }
+    // Bluetooth включили из шторки — экран обновится сам.
+    DisposableEffect(Unit) {
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(c: Context, i: Intent) { refresh++ }
+        }
+        ContextCompat.registerReceiver(ctx, receiver, IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED),
+            ContextCompat.RECEIVER_NOT_EXPORTED)
+        onDispose { runCatching { ctx.unregisterReceiver(receiver) } }
+    }
 
     val access = when {
         !granted -> BtAccess.NO_PERMISSION
         !vm.isBluetoothOn() -> BtAccess.OFF
         else -> BtAccess.OK
     }
-    val devices = remember(refresh, access) { if (access == BtAccess.OK) vm.pairedDevices() else emptyList() }
+    val devices = remember(refresh, access) {
+        when (access) {
+            BtAccess.OK -> vm.pairedDevices()
+            BtAccess.OFF -> vm.knownDevices()
+            BtAccess.NO_PERMISSION -> emptyList()
+        }
+    }
     LaunchedEffect(devices) { if (access == BtAccess.OK) vm.autoConnectIfNeeded(devices) }
     var auto by remember { mutableStateOf(vm.autoConnect) }
 
@@ -133,24 +152,29 @@ fun ConnectContent(
                     StatusNote("Нужен доступ к Bluetooth", Status.colors.warning, Icons.Filled.Warning,
                         "Без него приложение не увидит адаптер. Разрешение даёт только подключение к уже сопряжённым устройствам.")
                 }
-                BtAccess.OFF -> item {
-                    StatusNote("Bluetooth выключен", Status.colors.warning, AppIcons.Bluetooth)
-                }
-                BtAccess.OK -> {
-                    item { SectionTitle("Адаптеры", trailing = if (devices.isEmpty()) null else "${devices.size}") }
-                    item {
-                        Panel {
-                            if (devices.isEmpty()) {
-                                Text(
-                                    "Сопряжённых устройств нет. Вставьте адаптер в разъём OBD, включите зажигание и " +
-                                        "выполните сопряжение в настройках Bluetooth телефона (PIN обычно 1234 или 0000).",
-                                    Modifier.padding(16.dp), style = MaterialTheme.typography.bodyMedium,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                )
-                            }
-                            devices.forEachIndexed { i, d ->
-                                if (i > 0) PanelDivider()
-                                DeviceRow(d, d.address == lastDevice, enabled = !connecting) { onConnect(d.address) }
+                BtAccess.OFF, BtAccess.OK -> {
+                    if (access == BtAccess.OFF) item {
+                        StatusNote("Bluetooth выключен", Status.colors.warning, AppIcons.Bluetooth,
+                            body = if (devices.isNotEmpty()) "Включите его, чтобы подключиться к адаптеру." else null)
+                    }
+                    if (access == BtAccess.OK || devices.isNotEmpty()) {
+                        item { SectionTitle("Адаптеры", trailing = if (devices.isEmpty()) null else "${devices.size}") }
+                        item {
+                            Panel {
+                                if (devices.isEmpty() && access == BtAccess.OK) {
+                                    Text(
+                                        "Сопряжённых устройств нет. Вставьте адаптер в разъём OBD, включите зажигание и " +
+                                            "выполните сопряжение в настройках Bluetooth телефона (PIN обычно 1234 или 0000).",
+                                        Modifier.padding(16.dp), style = MaterialTheme.typography.bodyMedium,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                                devices.forEachIndexed { i, d ->
+                                    if (i > 0) PanelDivider()
+                                    DeviceRow(d, d.address == lastDevice, enabled = !connecting && access == BtAccess.OK) {
+                                        onConnect(d.address)
+                                    }
+                                }
                             }
                         }
                     }
@@ -159,10 +183,10 @@ fun ConnectContent(
                             Row(Modifier.fillMaxWidth().heightIn(min = 56.dp).padding(horizontal = 16.dp, vertical = 8.dp),
                                 verticalAlignment = Alignment.CenterVertically) {
                                 Column(Modifier.weight(1f)) {
-                                    Text("Подключаться автоматически", style = MaterialTheme.typography.bodyLarge,
-                                        color = MaterialTheme.colorScheme.onSurface)
-                                    Text("к последнему адаптеру при запуске", style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    Text("Автоподключение", style = MaterialTheme.typography.bodyLarge,
+                                        color = MaterialTheme.colorScheme.onSurface, maxLines = 1)
+                                    Text("к последнему адаптеру", style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
                                 }
                                 Spacer(Modifier.width(12.dp))
                                 Switch(checked = autoConnect, onCheckedChange = onAutoConnect)
@@ -182,8 +206,10 @@ fun ConnectContent(
         }
         ActionBar {
             if (access != BtAccess.OK) {
-                Button(onClick = onFixAccess, modifier = Modifier.weight(1f).heightIn(min = 48.dp)) {
-                    Text(if (access == BtAccess.OFF) "Включить Bluetooth" else "Разрешить доступ")
+                Button(onClick = onFixAccess, modifier = Modifier.weight(2f).heightIn(min = 48.dp),
+                    contentPadding = ButtonPadding) {
+                    Text(if (access == BtAccess.OFF) "Включить Bluetooth" else "Разрешить доступ",
+                        maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
             } else {
                 OutlinedButton(onClick = onBtSettings, modifier = Modifier.weight(1f).heightIn(min = 48.dp),
@@ -191,7 +217,8 @@ fun ConnectContent(
                     Text("Сопряжение", maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
             }
-            OutlinedButton(onClick = onDemo, enabled = !connecting, modifier = Modifier.weight(1f).heightIn(min = 48.dp),
+            OutlinedButton(onClick = onDemo, enabled = !connecting,
+                modifier = Modifier.weight(1f).heightIn(min = 48.dp),
                 contentPadding = ButtonPadding) {
                 Text("Демо", maxLines = 1, overflow = TextOverflow.Ellipsis)
             }

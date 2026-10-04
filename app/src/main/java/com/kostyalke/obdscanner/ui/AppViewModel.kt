@@ -263,11 +263,22 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     fun pairedDevices(): List<PairedDevice> {
         val adapter = getApplication<Application>().getSystemService(BluetoothManager::class.java)?.adapter
             ?: return emptyList()
-        return runCatching {
+        val list = runCatching {
             adapter.bondedDevices.map { PairedDevice(it.name ?: it.address, it.address) }
                 .sortedByDescending { d -> OBD_NAMES.any { d.name.contains(it, ignoreCase = true) } }
         }.getOrDefault(emptyList())
+        if (list.isNotEmpty()) {
+            prefs.edit().putStringSet("knownDevices", list.map { it.address + "|" + it.name }.toSet()).apply()
+        }
+        return list
     }
+
+    /** Последний известный список — показываем его, пока Bluetooth выключен. */
+    fun knownDevices(): List<PairedDevice> =
+        (prefs.getStringSet("knownDevices", emptySet()) ?: emptySet()).mapNotNull {
+            val i = it.indexOf('|')
+            if (i <= 0) null else PairedDevice(it.substring(i + 1), it.substring(0, i))
+        }.sortedBy { it.name }
 
     fun isBluetoothOn(): Boolean =
         getApplication<Application>().getSystemService(BluetoothManager::class.java)?.adapter?.isEnabled == true

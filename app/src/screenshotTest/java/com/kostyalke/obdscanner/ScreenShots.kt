@@ -136,4 +136,20 @@ class ScreenShots {
             }
         })
     }
+
+    @Test fun bluetoothOff() = shot("09_bt_off", false, @Composable {
+        AppScaffold("OBD Сканер", null, Tab.ERRORS, 0, false, false, {}, {}, {}, {}, {}) {
+            ConnectContent(ConnState.Disconnected, BtAccess.OFF,
+                listOf(PairedDevice("LC-B41", "00:12:12:43:A0:54"), PairedDevice("LC-B45", "00:12:12:AA:B5:DC")),
+                null, true, {}, {}, {}, {}, {}, {})
+        }
+    })
+
+    @Test fun bluetoothOn() = shot("10_bt_on", false, @Composable {
+        AppScaffold("OBD Сканер", null, Tab.ERRORS, 0, false, false, {}, {}, {}, {}, {}) {
+            ConnectContent(ConnState.Disconnected, BtAccess.OK,
+                listOf(PairedDevice("LC-B41", "00:12:12:43:A0:54"), PairedDevice("LC-B45", "00:12:12:AA:B5:DC")),
+                null, true, {}, {}, {}, {}, {}, {})
+        }
+    })
 }
