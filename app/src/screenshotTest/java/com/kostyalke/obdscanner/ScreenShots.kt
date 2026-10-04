@@ -119,4 +119,21 @@ class ScreenShots {
                 listOf(PairedDevice("OBDII", "00:1D:A5:68:98:8B")), "00:1D:A5:68:98:8B", true, {}, {}, {}, {}, {}, {})
         }
     })
+
+    @Test fun updateBanner() = listOf(true, false).forEach { dark ->
+        val rel = com.kostyalke.obdscanner.update.ReleaseInfo(9, "0.1.9", "x", 1, "Кнопка обновления и самообновление")
+        shot("08_update", dark, @Composable {
+            AppScaffold("OBD Сканер", null, Tab.ERRORS, 0, false, false, {}, {}, {}, {}, {},
+                banner = {
+                    androidx.compose.foundation.layout.Column {
+                        UpdateBanner(UpdateState.Available(rel), {}, {}, {}, {}, {})
+                        UpdateBanner(UpdateState.Downloading(rel, 0.42f), {}, {}, {}, {}, {})
+                        UpdateBanner(UpdateState.Ready(rel, needPermission = true), {}, {}, {}, {}, {})
+                    }
+                }) {
+                ConnectContent(ConnState.Disconnected, BtAccess.OK, listOf(PairedDevice("OBDII", "00:1D:A5:68:98:8B")),
+                    "00:1D:A5:68:98:8B", true, {}, {}, {}, {}, {}, {})
+            }
+        })
+    }
 }

@@ -22,6 +22,9 @@ import com.kostyalke.obdscanner.obd.PidDef
 import com.kostyalke.obdscanner.obd.Pids
 import com.kostyalke.obdscanner.obd.Readiness
 import com.kostyalke.obdscanner.obd.VehicleInfo
+import com.kostyalke.obdscanner.update.ReleaseInfo
+import com.kostyalke.obdscanner.update.Updater
+import java.io.File
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -32,6 +35,18 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.io.IOException
+
+sealed interface UpdateState {
+    data object Idle : UpdateState
+    data object Checking : UpdateState
+    data class UpToDate(val versionName: String) : UpdateState
+    data class Available(val rel: ReleaseInfo) : UpdateState
+    data class Downloading(val rel: ReleaseInfo, val progress: Float) : UpdateState
+    /** Скачано, но установка ждёт: нужно разрешение или идёт диагностика. */
+    data class Ready(val rel: ReleaseInfo, val needPermission: Boolean) : UpdateState
+    data class Installing(val rel: ReleaseInfo) : UpdateState
+    data class Failed(val message: String) : UpdateState
+}
 
 /** На каком этапе сломалось подключение — от этого зависят советы пользователю. */
 enum class FailStage { BLUETOOTH, ADAPTER, CAR, LOST }
@@ -131,8 +146,115 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     private var consecutiveTimeouts = 0
     private var autoConnectTried = false
 
+    private val _update = MutableStateFlow<UpdateState>(UpdateState.Idle)
+    val update: StateFlow<UpdateState> = _update.asStateFlow()
+    private var updateFile: File? = null
+
+    var autoUpdate: Boolean
+        get() = prefs.getBoolean("autoUpdate", true)
+        set(v) = prefs.edit().putBoolean("autoUpdate", v).apply()
+
+    val versionName: String = runCatching { Updater.currentVersionName(app) }.getOrDefault("?")
+
     init {
         refreshReports()
+        checkForUpdate(manual = false)
+        viewModelScope.launch {
+            Updater.installResult.collect { msg -> if (msg != null) _update.value = UpdateState.Failed(msg) }
+        }
+    }
+
+    // ---------- Обновление ----------
+
+    /**
+     * Проверка новой сборки на GitHub. В авто-режиме скачивает сразу, а ставит только когда
+     * нет связи с машиной: установка перезапускает приложение и оборвала бы диагностику.
+     */
+    fun checkForUpdate(manual: Boolean) {
+        val st = _update.value
+        if (st is UpdateState.Checking || st is UpdateState.Downloading || st is UpdateState.Installing) return
+        viewModelScope.launch {
+            if (manual) _update.value = UpdateState.Checking
+            try {
+                val rel = Updater.fetchLatest()
+                val current = Updater.currentVersionCode(getApplication())
+                if (rel.versionCode > current) {
+                    _update.value = UpdateState.Available(rel)
+                    if (autoUpdate) startUpdate()
+                } else {
+                    _update.value = if (manual) UpdateState.UpToDate(versionName) else UpdateState.Idle
+                    if (manual) {
+                        delay(3000)
+                        if (_update.value is UpdateState.UpToDate) _update.value = UpdateState.Idle
+                    }
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // Без интернета в гараже — обычное дело: молчим, если проверка была автоматической.
+                _update.value = if (manual) UpdateState.Failed("Не удалось проверить: ${e.message ?: "нет связи"}") else UpdateState.Idle
+            }
+        }
+    }
+
+    fun startUpdate() {
+        val rel = when (val st = _update.value) {
+            is UpdateState.Available -> st.rel
+            is UpdateState.Ready -> st.rel.also { tryInstall(it); return }
+            else -> return
+        }
+        viewModelScope.launch {
+            _update.value = UpdateState.Downloading(rel, 0f)
+            try {
+                updateFile = Updater.download(getApplication(), rel) { p ->
+                    _update.value = UpdateState.Downloading(rel, p)
+                }
+                tryInstall(rel)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _update.value = UpdateState.Failed(e.message ?: "Не удалось скачать обновление")
+            }
+        }
+    }
+
+    private fun tryInstall(rel: ReleaseInfo) {
+        val file = updateFile ?: run { _update.value = UpdateState.Available(rel); return }
+        val ctx = getApplication<Application>()
+        when {
+            !Updater.canInstall(ctx) -> _update.value = UpdateState.Ready(rel, needPermission = true)
+            _conn.value is ConnState.Connected || _conn.value is ConnState.Connecting ->
+                _update.value = UpdateState.Ready(rel, needPermission = false)
+            else -> {
+                _update.value = UpdateState.Installing(rel)
+                runCatching { Updater.install(ctx, file) }
+                    .onFailure { _update.value = UpdateState.Failed("Не удалось запустить установку: ${it.message}") }
+            }
+        }
+    }
+
+    /** Кнопка «Установить» в баннере — человек сам решил, даже если машина подключена. */
+    fun installNow() {
+        val st = _update.value as? UpdateState.Ready ?: return
+        if (_conn.value is ConnState.Connected) disconnect()
+        tryInstall(st.rel)
+    }
+
+    /** Вернулись из настроек «Установка неизвестных приложений». */
+    fun onResume() {
+        val st = _update.value
+        if (st is UpdateState.Ready && st.needPermission && Updater.canInstall(getApplication())) {
+            if (_conn.value !is ConnState.Connected) tryInstall(st.rel)
+            else _update.value = st.copy(needPermission = false)
+        }
+        if (st is UpdateState.Installing) {
+            // Система вернула нас без обновления (например, нажали «Отмена»).
+            _update.value = UpdateState.Ready(st.rel, needPermission = false)
+        }
+    }
+
+    fun dismissUpdate() {
+        _update.value = UpdateState.Idle
     }
 
     // ---------- Подключение ----------

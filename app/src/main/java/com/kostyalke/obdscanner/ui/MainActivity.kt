@@ -23,6 +23,9 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material3.Checkbox
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Badge
 import androidx.compose.material3.BadgedBox
@@ -65,6 +68,11 @@ class MainActivity : ComponentActivity() {
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         setContent { AppTheme { App(vm) } }
     }
+
+    override fun onResume() {
+        super.onResume()
+        vm.onResume()
+    }
 }
 
 /** [label] — короткая подпись вкладки (влезает и при крупном шрифте), [title] — заголовок экрана. */
@@ -93,6 +101,8 @@ private fun App(vm: AppViewModel) {
     var tab by rememberSaveable { mutableStateOf(Tab.ERRORS) }
     var overlay by rememberSaveable { mutableStateOf(Overlay.NONE) }
     val connected = conn as? ConnState.Connected
+    val update by vm.update.collectAsStateWithLifecycle()
+    var autoUpdate by remember { mutableStateOf(vm.autoUpdate) }
 
     BackHandler(enabled = overlay != Overlay.NONE) { overlay = Overlay.NONE }
 
@@ -113,6 +123,25 @@ private fun App(vm: AppViewModel) {
         onLog = { overlay = Overlay.LOG },
         onHistory = { overlay = Overlay.HISTORY },
         onDisconnect = { vm.disconnect() },
+        versionName = vm.versionName,
+        autoUpdate = autoUpdate,
+        onAutoUpdate = { autoUpdate = it; vm.autoUpdate = it },
+        onCheckUpdate = { vm.checkForUpdate(manual = true) },
+        banner = {
+            UpdateBanner(
+                update,
+                onUpdate = vm::startUpdate,
+                onInstall = vm::installNow,
+                onGrant = {
+                    runCatching {
+                        ctx.startActivity(Intent(android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                            Uri.parse("package:" + ctx.packageName)))
+                    }
+                },
+                onRetry = { vm.checkForUpdate(manual = true) },
+                onDismiss = vm::dismissUpdate,
+            )
+        },
     ) {
         when {
             overlay == Overlay.HISTORY -> {
@@ -181,6 +210,11 @@ fun AppScaffold(
     onLog: () -> Unit,
     onHistory: () -> Unit,
     onDisconnect: () -> Unit,
+    versionName: String = "",
+    autoUpdate: Boolean = true,
+    onAutoUpdate: (Boolean) -> Unit = {},
+    onCheckUpdate: () -> Unit = {},
+    banner: @Composable () -> Unit = {},
     content: @Composable () -> Unit,
 ) {
     var menu by remember { mutableStateOf(false) }
@@ -220,6 +254,23 @@ fun AppScaffold(
                                     leadingIcon = { Icon(Icons.Filled.Close, null) },
                                     onClick = { menu = false; onDisconnect() },
                                 )
+                                HorizontalDivider()
+                                DropdownMenuItem(
+                                    text = { Text("Проверить обновления") },
+                                    leadingIcon = { Icon(Icons.Filled.Refresh, null) },
+                                    onClick = { menu = false; onCheckUpdate() },
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Обновлять автоматически") },
+                                    trailingIcon = { Checkbox(checked = autoUpdate, onCheckedChange = null) },
+                                    onClick = { onAutoUpdate(!autoUpdate) },
+                                )
+                                Text(
+                                    "Версия $versionName",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                                )
                             }
                         }
                     }
@@ -245,7 +296,10 @@ fun AppScaffold(
             }
         },
     ) { padding ->
-        Box(Modifier.padding(padding)) { content() }
+        Column(Modifier.padding(padding)) {
+            banner()
+            Box(Modifier.weight(1f)) { content() }
+        }
     }
 }
 

@@ -45,6 +45,27 @@ jobs:
         if: always()
         run: rm -f app/obd-scanner.jks
 
+      - name: Описание версии для автообновления
+        env:
+          RUN: ${{ github.run_number }}
+          SHA: ${{ github.sha }}
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os, subprocess, datetime
+          apk = open("obd-scanner.apk", "rb").read()
+          subject = subprocess.run(["git", "log", "-1", "--format=%s"], capture_output=True, text=True).stdout.strip()
+          json.dump({
+              "versionCode": int(os.environ["RUN"]),
+              "versionName": "0.1." + os.environ["RUN"],
+              "sha256": hashlib.sha256(apk).hexdigest(),
+              "size": len(apk),
+              "notes": subject,
+              "commit": os.environ["SHA"],
+              "date": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+          }, open("version.json", "w"), ensure_ascii=False, indent=1)
+          print(open("version.json").read())
+          PY
+
       - uses: actions/upload-artifact@v7
         with:
           name: obd-scanner-apk
@@ -55,7 +76,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release delete latest --yes --cleanup-tag || true
-          gh release create latest obd-scanner.apk \
+          gh release create latest obd-scanner.apk version.json \
             --title "OBD Сканер (сборка ${{ github.run_number }})" \
             --notes "Последняя сборка из main, коммит ${{ github.sha }}. Скачайте obd-scanner.apk и установите на телефон." \
             --target ${{ github.sha }}

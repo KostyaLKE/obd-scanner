@@ -185,4 +185,14 @@ class ParserTest {
             assertEquals(8, e.tried.size)
         }
     }
+
+    @Test
+    fun releaseInfoParsing() {
+        val r = com.kostyalke.obdscanner.update.ReleaseInfo.parse(
+            """{"versionCode": 9, "versionName": "0.1.9", "sha256": "ABCDEF", "size": 6600000, "notes": "Автообновление"}"""
+        )
+        assertEquals(9, r.versionCode)
+        assertEquals("abcdef", r.sha256)
+        assertEquals("Автообновление", r.notes)
+    }
 }

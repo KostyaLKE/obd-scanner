@@ -80,6 +80,8 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
 
     testImplementation("junit:junit:4.13.2")
+    // В юнит-тестах android.jar — заглушка, нужен настоящий org.json.
+    testImplementation("org.json:json:20240303")
 }
 
 // Скриншот-тесты подключаются только по флагу, чтобы не мешать обычной сборке и CI.
