@@ -1,8 +1,20 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
 }
+
+// Ключ подписи НЕ хранится в репозитории (см. комментарий в signingConfigs).
+val ksProps = Properties().apply {
+    val f = rootProject.file("keystore.properties")
+    if (f.exists()) f.inputStream().use { load(it) }
+}
+fun sign(name: String): String? = System.getenv(name) ?: ksProps.getProperty(name)
+val ksFile: File? = sign("KEYSTORE_FILE")?.let { rootProject.file(it) }
+    ?: file("obd-scanner.jks").takeIf { it.exists() }
+val ksPassword: String? = sign("KEYSTORE_PASSWORD")
 
 android {
     namespace = "com.kostyalke.obdscanner"
@@ -20,14 +32,6 @@ android {
     // CI: берётся из GitHub Secrets (KEYSTORE_BASE64 → app/obd-scanner.jks + пароли в env).
     // Локально: файл keystore.properties в корне проекта (см. README). Если ни того, ни другого
     // нет — обычная debug-подпись Android Studio.
-    val ksProps = java.util.Properties().apply {
-        val f = rootProject.file("keystore.properties")
-        if (f.exists()) f.inputStream().use { load(it) }
-    }
-    fun sign(name: String) = System.getenv(name) ?: ksProps.getProperty(name)
-    val ksFile = sign("KEYSTORE_FILE")?.let { rootProject.file(it) }
-        ?: file("obd-scanner.jks").takeIf { it.exists() }
-    val ksPassword = sign("KEYSTORE_PASSWORD")
     val hasSigning = ksFile != null && ksFile.exists() && ksPassword != null
 
     signingConfigs {
