@@ -21,13 +21,29 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v6
 
+      - name: Ключ подписи из Secrets
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        run: |
+          test -n "$KEYSTORE_BASE64" || { echo "Нет секрета KEYSTORE_BASE64"; exit 1; }
+          echo "$KEYSTORE_BASE64" | base64 -d > app/obd-scanner.jks
+
       - name: Тесты
         run: ./gradlew testDebugUnitTest --console=plain
 
       - name: Сборка
+        env:
+          KEYSTORE_FILE: app/obd-scanner.jks
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
           ./gradlew assembleRelease --console=plain
           cp app/build/outputs/apk/release/app-release.apk obd-scanner.apk
+
+      - name: Удалить ключ
+        if: always()
+        run: rm -f app/obd-scanner.jks
 
       - uses: actions/upload-artifact@v7
         with:

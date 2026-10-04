@@ -6,3 +6,7 @@ local.properties
 .DS_Store
 captures/
 .kotlin/
+# ключи подписи — никогда в репозиторий
+*.jks
+*.keystore
+keystore.properties

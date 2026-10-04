@@ -31,7 +31,8 @@ Android-приложение для диагностики автомобиля 
 5. Откройте приложение и выберите адаптер.
 
 Каждый пуш в `main` собирает новый APK (GitHub Actions). Он ставится поверх старого:
-подпись постоянная, ключ лежит в `app/obd-scanner.jks`. Это личное приложение, не для Google Play.
+подпись постоянная, ключ хранится в GitHub Secrets (`KEYSTORE_BASE64`, `KEYSTORE_PASSWORD`,
+`KEY_ALIAS`, `KEY_PASSWORD`), в репозитории его нет. Это личное приложение, не для Google Play.
 
 ## Ограничения
 
@@ -46,6 +47,18 @@ Android-приложение для диагностики автомобиля 
 ./gradlew assembleDebug
 python3 tools/gen_dtc.py      # пересобрать базу ошибок (assets/*.tsv)
 ```
+
+Чтобы локальная сборка подписывалась тем же ключом, что и CI, положите `obd-scanner.jks` в `app/`
+и создайте в корне `keystore.properties`:
+
+```
+KEYSTORE_FILE=app/obd-scanner.jks
+KEYSTORE_PASSWORD=...
+KEY_ALIAS=obd
+KEY_PASSWORD=...
+```
+
+Без этих файлов `assembleRelease` подпишет APK debug-ключом (поверх CI-сборки не встанет).
 
 Структура: `elm/` — Bluetooth и ELM327, `obd/` — протокол OBD-II, ошибки, датчики,
 `ui/` — экраны на Jetpack Compose.

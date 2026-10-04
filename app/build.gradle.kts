@@ -16,24 +16,38 @@ android {
         versionName = "0.1." + (System.getenv("GITHUB_RUN_NUMBER") ?: "0")
     }
 
-    // Личное приложение: ключ лежит в репозитории, чтобы каждая сборка из CI
-    // ставилась поверх предыдущей без удаления.
+    // Ключ подписи НЕ хранится в репозитории.
+    // CI: берётся из GitHub Secrets (KEYSTORE_BASE64 → app/obd-scanner.jks + пароли в env).
+    // Локально: файл keystore.properties в корне проекта (см. README). Если ни того, ни другого
+    // нет — обычная debug-подпись Android Studio.
+    val ksProps = java.util.Properties().apply {
+        val f = rootProject.file("keystore.properties")
+        if (f.exists()) f.inputStream().use { load(it) }
+    }
+    fun sign(name: String) = System.getenv(name) ?: ksProps.getProperty(name)
+    val ksFile = sign("KEYSTORE_FILE")?.let { rootProject.file(it) }
+        ?: file("obd-scanner.jks").takeIf { it.exists() }
+    val ksPassword = sign("KEYSTORE_PASSWORD")
+    val hasSigning = ksFile != null && ksFile.exists() && ksPassword != null
+
     signingConfigs {
-        create("app") {
-            storeFile = file("obd-scanner.jks")
-            storePassword = "obdscanner"
-            keyAlias = "obd"
-            keyPassword = "obdscanner"
+        if (hasSigning) {
+            create("app") {
+                storeFile = ksFile
+                storePassword = ksPassword
+                keyAlias = sign("KEY_ALIAS") ?: "obd"
+                keyPassword = sign("KEY_PASSWORD") ?: ksPassword
+            }
         }
     }
 
     buildTypes {
         release {
             isMinifyEnabled = false
-            signingConfig = signingConfigs.getByName("app")
+            signingConfig = if (hasSigning) signingConfigs.getByName("app") else signingConfigs.getByName("debug")
         }
         debug {
-            signingConfig = signingConfigs.getByName("app")
+            if (hasSigning) signingConfig = signingConfigs.getByName("app")
         }
     }
 
