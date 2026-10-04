@@ -86,4 +86,7 @@ dependencies {
 if (project.hasProperty("screenshots")) {
     apply(plugin = "app.cash.paparazzi")
     android.sourceSets.getByName("test").java.srcDir("src/screenshotTest/java")
+    tasks.withType<Test>().configureEach {
+        systemProperty("fontscale", project.findProperty("fontscale") ?: "1.0")
+    }
 }

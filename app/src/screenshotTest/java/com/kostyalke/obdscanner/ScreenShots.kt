@@ -21,7 +21,14 @@ import java.io.File
 /** Рендер экранов без эмулятора: ./gradlew recordPaparazziDebug -Pscreenshots */
 class ScreenShots {
     @get:Rule
-    val paparazzi = Paparazzi(deviceConfig = DeviceConfig.NEXUS_5.copy(softButtons = false), maxPercentDifference = 0.1)
+    val paparazzi = Paparazzi(
+        deviceConfig = DeviceConfig.NEXUS_5.copy(
+            softButtons = false,
+            // Крупный системный шрифт, как на телефоне владельца (Samsung): -Pfontscale=1.3
+            fontScale = (System.getProperty("fontscale") ?: "1.0").toFloat(),
+        ),
+        maxPercentDifference = 0.1,
+    )
 
     private val db = DtcDatabase(
         DtcDatabase.parseTsv(File("src/main/assets/dtc_ru.tsv").readText()),

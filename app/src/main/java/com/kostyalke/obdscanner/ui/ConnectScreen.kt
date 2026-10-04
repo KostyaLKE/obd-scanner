@@ -21,7 +21,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
@@ -43,6 +43,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 
@@ -185,14 +186,14 @@ fun ConnectContent(
                     Text(if (access == BtAccess.OFF) "Включить Bluetooth" else "Разрешить доступ")
                 }
             } else {
-                OutlinedButton(onClick = onBtSettings, modifier = Modifier.weight(1f).heightIn(min = 48.dp)) {
-                    Icon(Icons.Filled.Settings, null, Modifier.size(18.dp))
-                    Spacer(Modifier.width(8.dp))
-                    Text("Сопряжение")
+                OutlinedButton(onClick = onBtSettings, modifier = Modifier.weight(1f).heightIn(min = 48.dp),
+                    contentPadding = ButtonPadding) {
+                    Text("Сопряжение", maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
             }
-            OutlinedButton(onClick = onDemo, enabled = !connecting, modifier = Modifier.weight(1f).heightIn(min = 48.dp)) {
-                Text("Демо-режим")
+            OutlinedButton(onClick = onDemo, enabled = !connecting, modifier = Modifier.weight(1f).heightIn(min = 48.dp),
+                contentPadding = ButtonPadding) {
+                Text("Демо", maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
         }
     }
@@ -211,20 +212,15 @@ private fun DeviceRow(d: PairedDevice, last: Boolean, enabled: Boolean, onClick:
         }
         Spacer(Modifier.width(14.dp))
         Column(Modifier.weight(1f)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(d.name, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium,
-                    color = MaterialTheme.colorScheme.onSurface, maxLines = 1, modifier = Modifier.weight(1f, fill = false))
-                if (last) {
-                    Spacer(Modifier.width(8.dp))
-                    StatusPill("последний", Status.colors.neutral)
-                }
-            }
-            Text(d.address, style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
+            Text(d.name, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium,
+                color = MaterialTheme.colorScheme.onSurface, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(if (last) "последний · " + d.address else d.address, style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
         Spacer(Modifier.width(8.dp))
-        Text("Подключить", style = MaterialTheme.typography.labelLarge,
-            color = if (enabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline)
+        // Строка целиком — кнопка; синяя стрелка показывает, что на неё можно нажать.
+        Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = "Подключить",
+            tint = if (enabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline)
     }
 }
 

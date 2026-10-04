@@ -27,6 +27,7 @@ import androidx.compose.ui.unit.dp
 
 val ScreenPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp)
 val PanelShape = RoundedCornerShape(16.dp)
+val ButtonPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)
 
 /** Нейтральная панель с информацией. Без тени: глубина задаётся тоном поверхности. */
 @Composable

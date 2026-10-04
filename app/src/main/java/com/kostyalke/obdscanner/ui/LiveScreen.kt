@@ -61,11 +61,11 @@ fun LiveContent(
                 SegmentedButton(
                     selected = !st.onlyFavorites, onClick = { onOnlyFavorites(false) },
                     shape = SegmentedButtonDefaults.itemShape(0, 2),
-                ) { Text("Все · ${st.supported.size}") }
+                ) { Text("Все", maxLines = 1) }
                 SegmentedButton(
                     selected = st.onlyFavorites, onClick = { onOnlyFavorites(true) },
                     shape = SegmentedButtonDefaults.itemShape(1, 2),
-                ) { Text("Избранные · ${st.favorites.count { f -> st.supported.any { it.pid == f } }}") }
+                ) { Text("Избранные", maxLines = 1, overflow = TextOverflow.Ellipsis) }
             }
             IconButton(onClick = onResetMinMax) {
                 Icon(Icons.Filled.Refresh, contentDescription = "Сбросить мин/макс", tint = MaterialTheme.colorScheme.primary)
@@ -143,21 +143,26 @@ private fun LiveTile(def: PidDef, v: LiveValue?, fav: Boolean, onFav: () -> Unit
             Row(verticalAlignment = Alignment.Bottom, modifier = Modifier.padding(end = 14.dp)) {
                 Text(
                     v?.let { Pids.format(def, it.value) } ?: "—",
-                    style = MaterialTheme.typography.headlineMedium.merge(Tabular),
+                    style = MaterialTheme.typography.headlineSmall.merge(Tabular),
                     fontWeight = FontWeight.SemiBold,
                     color = MaterialTheme.colorScheme.onSurface,
                     maxLines = 1,
+                    softWrap = false,
                 )
                 if (def.unit.isNotEmpty()) {
                     Spacer(Modifier.width(4.dp))
-                    Text(def.unit, style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(bottom = 4.dp))
+                    Text(def.unit, style = MaterialTheme.typography.labelMedium, maxLines = 1, softWrap = false,
+                        overflow = TextOverflow.Clip,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(bottom = 3.dp))
                 }
             }
+            // Диапазон за сеанс: «1472 – 2208» короче, чем «мин … · макс …», и не переносится.
             Text(
-                if (v != null) "мин ${Pids.format(def, v.min)} · макс ${Pids.format(def, v.max)}" else " ",
+                if (v != null) "${Pids.format(def, v.min)} – ${Pids.format(def, v.max)}" else " ",
                 style = MaterialTheme.typography.labelSmall.merge(Tabular),
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
             )
             Spacer(Modifier.height(8.dp))
             Sparkline(v?.history ?: emptyList(), Modifier.padding(end = 14.dp))

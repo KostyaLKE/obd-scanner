@@ -67,11 +67,12 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-enum class Tab(val title: String, val icon: ImageVector) {
-    ERRORS("Ошибки", Icons.Filled.Warning),
-    LIVE("Датчики", AppIcons.Speed),
-    READY("Готовность", Icons.Filled.CheckCircle),
-    CAR("Авто", AppIcons.Car),
+/** [label] — короткая подпись вкладки (влезает и при крупном шрифте), [title] — заголовок экрана. */
+enum class Tab(val label: String, val title: String, val icon: ImageVector) {
+    ERRORS("Ошибки", "Ошибки", Icons.Filled.Warning),
+    LIVE("Датчики", "Датчики", AppIcons.Speed),
+    READY("Тесты", "Готовность систем", Icons.Filled.CheckCircle),
+    CAR("Авто", "Авто", AppIcons.Car),
 }
 
 private enum class Overlay { NONE, LOG, HISTORY }
@@ -238,7 +239,7 @@ fun AppScaffold(
                                 }
                             } else Icon(t.icon, contentDescription = null)
                         },
-                        label = { Text(t.title, maxLines = 1) },
+                        label = { Text(t.label, maxLines = 1, overflow = TextOverflow.Ellipsis) },
                     )
                 }
             }
