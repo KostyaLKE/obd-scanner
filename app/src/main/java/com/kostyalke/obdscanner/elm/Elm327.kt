@@ -4,6 +4,11 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
+/** Понятная причина, почему не удалось подключиться: виноват адаптер или связь с машиной. */
+class ConnectProblem(val stage: Stage, message: String, val tried: List<String> = emptyList()) : Exception(message) {
+    enum class Stage { ADAPTER, CAR }
+}
+
 data class LogLine(val time: Long, val outgoing: Boolean, val text: String)
 
 /** Ответ адаптера: строки без эха и служебного мусора. */
@@ -90,31 +95,84 @@ class Elm327(
         ElmReply(command, raw, cleanLines(command, raw))
     }
 
-    /** Инициализация адаптера и поиск протокола машины. */
-    suspend fun initialize(onStep: (String) -> Unit) {
-        onStep("Сброс адаптера…")
+    /** Напряжение на разъёме OBD по данным адаптера (ATRV), если удалось прочитать. */
+    var voltage: Double? = null
+        private set
+
+    /**
+     * Инициализация: сначала проверяем сам адаптер, потом ищем протокол машины.
+     * Если автопоиск не сработал — перебираем протоколы вручную. Для K-line включаем ATKW0:
+     * блоки VAG часто присылают «нестандартные» ключевые слова, и ELM327 из-за этого
+     * отвечает BUS INIT: ERROR.
+     *
+     * @param preferred протокол, который сработал в прошлый раз (ускоряет подключение)
+     */
+    suspend fun initialize(preferred: Char?, onStep: (String) -> Unit) {
+        onStep("Проверка адаптера…")
         runCatching { send("ATD", 2000) }
         val z = runCatching { send("ATZ", 4000) }.getOrNull()
         delay(500)
         version = z?.lines?.firstOrNull { it.contains("ELM", true) } ?: ""
-        onStep("Настройка…")
-        for (cmd in listOf("ATE0", "ATL0", "ATS1", "ATH1", "ATAT1", "ATSP0")) {
-            val r = send(cmd, 3000)
-            if (r.lines.none { it.equals("OK", true) } && cmd != "ATE0") {
-                // Некоторые клоны не знают отдельных команд — это не фатально.
-                if (cmd == "ATH1") throw IllegalStateException("Адаптер не поддерживает ATH1 (заголовки)")
+        val e0 = runCatching { send("ATE0", 3000) }.getOrNull()
+        if (e0 == null || e0.lines.none { it.equals("OK", true) }) {
+            val i = runCatching { send("ATI", 3000) }.getOrNull()
+            if (i == null || i.lines.isEmpty()) {
+                throw ConnectProblem(
+                    ConnectProblem.Stage.ADAPTER,
+                    "Bluetooth подключился, но адаптер не отвечает на команды.",
+                )
+            }
+        }
+        onStep("Настройка адаптера…")
+        for (cmd in listOf("ATL0", "ATS1", "ATH1", "ATAT1")) {
+            val r = runCatching { send(cmd, 3000) }.getOrNull()
+            if (cmd == "ATH1" && (r == null || r.lines.none { it.equals("OK", true) })) {
+                throw ConnectProblem(
+                    ConnectProblem.Stage.ADAPTER,
+                    "Адаптер не выполняет базовые команды ELM327 (ATH1). Похоже на неисправный или очень урезанный клон.",
+                )
             }
         }
         if (version.isEmpty()) version = runCatching { send("ATI", 2000).lines.firstOrNull() }.getOrNull() ?: "?"
-        onStep("Поиск протокола машины (до 20 с)…")
-        val probe = send("0100", 20000)
-        probe.error?.let { throw IllegalStateException(it) }
-        if (probe.isNoData) throw IllegalStateException("Машина не ответила на запрос OBD. Включите зажигание.")
-        protocol = ObdProtocol.fromDpn(send("ATDPN", 2000).lines.firstOrNull() ?: "")
-        onStep("Протокол: ${protocol.title}")
+        voltage = runCatching { send("ATRV", 2000).lines.firstOrNull() }.getOrNull()?.let(::parseVoltage)
+
+        val order = buildList {
+            preferred?.takeIf { it != '0' }?.let { add(it) }
+            add('0')
+            addAll(listOf('5', '4', '3', '6', '8', '7', '9'))
+        }.distinct()
+        val tried = ArrayList<String>()
+        for (code in order) {
+            val p = ObdProtocol.entries.first { it.code == code }
+            onStep(if (code == '0') "Автопоиск протокола машины (до 20 с)…" else "Пробую протокол: ${p.title}…")
+            val kLine = code in '3'..'5'
+            if (kLine) runCatching { send("ATKW0", 2000) }
+            runCatching { send("ATSP$code", 2000) }
+            val probe = try {
+                send("0100", if (code == '0') 20000 else if (kLine) 12000 else 5000)
+            } catch (e: ElmTimeoutException) {
+                tried += "${p.title}: нет ответа"
+                continue
+            }
+            val ok = probe.error == null && !probe.isNoData &&
+                probe.lines.any { it.replace(" ", "").uppercase().contains("4100") }
+            if (ok) {
+                val dpn = runCatching { send("ATDPN", 2000).lines.firstOrNull() }.getOrNull() ?: ""
+                protocol = ObdProtocol.fromDpn(dpn).takeIf { it != ObdProtocol.AUTO } ?: p
+                // Закрепляем найденный протокол, чтобы адаптер не искал его заново после паузы.
+                if (code == '0') runCatching { send("ATSP${protocol.code}", 2000) }
+                onStep("Протокол: ${protocol.title}")
+                return
+            }
+            tried += "${p.title}: ${probe.error ?: if (probe.isNoData) "нет данных" else "непонятный ответ"}"
+        }
+        throw ConnectProblem(ConnectProblem.Stage.CAR, "Адаптер работает, но машина не ответила.", tried)
     }
 
     companion object {
+        fun parseVoltage(s: String): Double? =
+            Regex("(\\d{1,2}[.,]\\d)").find(s)?.value?.replace(',', '.')?.toDoubleOrNull()
+
         fun cleanLines(command: String, raw: String): List<String> =
             raw.split('\r', '\n')
                 .map { it.trim() }

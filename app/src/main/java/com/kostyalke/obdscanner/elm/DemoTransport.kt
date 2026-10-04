@@ -7,8 +7,14 @@ import kotlin.math.sin
  * Эмулятор ELM327 + дизельная Skoda на K-line (ISO 14230, как Fabia I 1.9 SDI/TDI).
  * Нужен, чтобы проверить приложение без машины.
  */
-class DemoTransport : ObdTransport {
+class DemoTransport(
+    /** Для тестов: блок отвечает только при ATKW0 и явном протоколе 5, как капризные блоки VAG. */
+    private val strictKeyword: Boolean = false,
+) : ObdTransport {
     override val name = "Демо: Skoda Fabia 1.9 TDI"
+
+    private var kw0 = false
+    private var proto = '0'
 
     private var pending = ""
     private val start = System.currentTimeMillis()
@@ -51,6 +57,11 @@ class DemoTransport : ObdTransport {
     private fun t() = (System.currentTimeMillis() - start) / 1000.0
 
     private fun respond(cmd: String): List<String> {
+        if (cmd == "ATKW0") kw0 = true
+        if (cmd.startsWith("ATSP") && cmd.length == 5) proto = cmd[4]
+        if (strictKeyword && !cmd.startsWith("AT") && !(kw0 && proto == '5')) {
+            return listOf("BUS INIT: ...ERROR")
+        }
         if (cmd.startsWith("AT")) return when {
             cmd == "ATZ" || cmd == "ATWS" -> listOf("", "ELM327 v1.5 (демо)")
             cmd == "ATI" -> listOf("ELM327 v1.5 (демо)")

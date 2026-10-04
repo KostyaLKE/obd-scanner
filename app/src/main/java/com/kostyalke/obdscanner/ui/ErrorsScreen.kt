@@ -75,6 +75,9 @@ fun ErrorsScreen(vm: AppViewModel, onOpenHistory: () -> Unit) {
                 if (st.loading || st.clearing) CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 3.dp)
             }
         }
+        (vm.conn.value as? ConnState.Connected)?.warnings?.forEach { w ->
+            item { Banner("⚠ $w", Warning.copy(alpha = 0.18f), MaterialTheme.colorScheme.onSurface) }
+        }
         st.error?.let { item { Banner(it, MaterialTheme.colorScheme.errorContainer, MaterialTheme.colorScheme.onErrorContainer) } }
         st.message?.let { item { Banner(it, MaterialTheme.colorScheme.secondaryContainer, MaterialTheme.colorScheme.onSecondaryContainer) } }
 

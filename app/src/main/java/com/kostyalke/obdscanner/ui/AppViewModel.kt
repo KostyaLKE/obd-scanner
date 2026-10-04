@@ -2,7 +2,6 @@ package com.kostyalke.obdscanner.ui
 
 import android.annotation.SuppressLint
 import android.app.Application
-import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothManager
 import android.content.Context
 import androidx.lifecycle.AndroidViewModel
@@ -10,6 +9,7 @@ import androidx.lifecycle.viewModelScope
 import com.kostyalke.obdscanner.data.HistoryStore
 import com.kostyalke.obdscanner.data.SavedReport
 import com.kostyalke.obdscanner.elm.BluetoothTransport
+import com.kostyalke.obdscanner.elm.ConnectProblem
 import com.kostyalke.obdscanner.elm.DemoTransport
 import com.kostyalke.obdscanner.elm.Elm327
 import com.kostyalke.obdscanner.elm.ElmTimeoutException
@@ -23,7 +23,6 @@ import com.kostyalke.obdscanner.obd.Pids
 import com.kostyalke.obdscanner.obd.Readiness
 import com.kostyalke.obdscanner.obd.VehicleInfo
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -32,14 +31,27 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import java.io.IOException
+
+/** На каком этапе сломалось подключение — от этого зависят советы пользователю. */
+enum class FailStage { BLUETOOTH, ADAPTER, CAR, LOST }
 
 sealed interface ConnState {
     data object Disconnected : ConnState
     data class Connecting(val step: String) : ConnState
-    data class Connected(val deviceName: String, val protocol: String, val elmVersion: String) : ConnState
-    data class Failed(val message: String) : ConnState
+    data class Connected(
+        val deviceName: String,
+        val protocol: String,
+        val elmVersion: String,
+        val voltage: Double? = null,
+        val warnings: List<String> = emptyList(),
+    ) : ConnState
+    data class Failed(
+        val message: String,
+        val stage: FailStage? = null,
+        val tried: List<String> = emptyList(),
+        val voltage: Double? = null,
+    ) : ConnState
 }
 
 data class PairedDevice(val name: String, val address: String)
@@ -100,9 +112,24 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     val lastDevice: String? get() = prefs.getString("lastDevice", null)
 
+    var autoConnect: Boolean
+        get() = prefs.getBoolean("autoConnect", true)
+        set(v) = prefs.edit().putBoolean("autoConnect", v).apply()
+
+    private sealed interface Target {
+        val key: String
+        data class Bt(val address: String) : Target { override val key get() = address }
+        data object Demo : Target { override val key get() = "demo" }
+    }
+
+    private var target: Target? = null
     private var transport: ObdTransport? = null
     private var service: ObdService? = null
+    private var connectJob: Job? = null
     private var liveJob: Job? = null
+    private var liveWanted = false
+    private var consecutiveTimeouts = 0
+    private var autoConnectTried = false
 
     init {
         refreshReports()
@@ -123,53 +150,133 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     fun isBluetoothOn(): Boolean =
         getApplication<Application>().getSystemService(BluetoothManager::class.java)?.adapter?.isEnabled == true
 
-    fun connect(address: String) {
-        val adapter = getApplication<Application>().getSystemService(BluetoothManager::class.java)?.adapter
-        if (adapter == null) {
-            _conn.value = ConnState.Failed("На телефоне нет Bluetooth")
-            return
-        }
-        val device: BluetoothDevice = adapter.getRemoteDevice(address)
-        prefs.edit().putString("lastDevice", address).apply()
-        start(BluetoothTransport(adapter, device))
+    /** Один раз за запуск приложения подключается к последнему адаптеру. */
+    fun autoConnectIfNeeded(paired: List<PairedDevice>) {
+        if (autoConnectTried || !autoConnect || _conn.value != ConnState.Disconnected) return
+        val last = lastDevice ?: return
+        if (paired.none { it.address == last }) return
+        autoConnectTried = true
+        connect(last)
     }
 
-    fun connectDemo() = start(DemoTransport())
+    fun connect(address: String) {
+        autoConnectTried = true
+        prefs.edit().putString("lastDevice", address).apply()
+        target = Target.Bt(address)
+        start(reconnect = false)
+    }
 
-    private fun start(t: ObdTransport) {
-        disconnect()
-        _conn.value = ConnState.Connecting("Подключение к «${t.name}»…")
-        viewModelScope.launch {
-            try {
-                withContext(Dispatchers.IO) { t.open() }
-                transport = t
-                val elm = Elm327(t) { line -> appendLog(line) }
-                elm.initialize { step -> _conn.value = ConnState.Connecting(step) }
-                val s = ObdService(elm)
-                service = s
-                _conn.value = ConnState.Connected(t.name, elm.protocol.title, elm.version)
-                _live.update { it.copy(supported = emptyList(), values = emptyMap()) }
-                _vehicle.value = null
-                runCatching { loadSupported() }
-                _live.update { it.copy(loading = false) }
-                readDtcs()
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                t.close()
-                transport = null
-                service = null
-                _conn.value = ConnState.Failed(humanError(e))
+    fun connectDemo() {
+        autoConnectTried = true
+        target = Target.Demo
+        start(reconnect = false)
+    }
+
+    private fun makeTransport(t: Target): ObdTransport? = when (t) {
+        Target.Demo -> DemoTransport()
+        is Target.Bt -> {
+            val adapter = getApplication<Application>().getSystemService(BluetoothManager::class.java)?.adapter
+            if (adapter == null) null else BluetoothTransport(adapter, adapter.getRemoteDevice(t.address))
+        }
+    }
+
+    /**
+     * Подключение. При [reconnect] = true (связь оборвалась) делает до трёх попыток
+     * и сохраняет уже прочитанные данные на экране.
+     */
+    private fun start(reconnect: Boolean) {
+        val tg = target ?: return
+        pauseLive()
+        closeTransport()
+        connectJob?.cancel()
+        connectJob = viewModelScope.launch {
+            val attempts = if (reconnect) 3 else 1
+            var lastError: Exception? = null
+            var voltage: Double? = null
+            for (attempt in 1..attempts) {
+                val t = makeTransport(tg)
+                if (t == null) {
+                    _conn.value = ConnState.Failed("На телефоне нет Bluetooth", FailStage.BLUETOOTH)
+                    return@launch
+                }
+                val prefix = if (reconnect) "Связь потеряна, переподключаюсь ($attempt из $attempts). " else ""
+                _conn.value = ConnState.Connecting(prefix + "Подключение к «${t.name}»…")
+                var stage = FailStage.BLUETOOTH
+                try {
+                    t.open()
+                    transport = t
+                    stage = FailStage.ADAPTER
+                    val elm = Elm327(t) { line -> appendLog(line) }
+                    val protoKey = "proto_" + tg.key
+                    elm.initialize(prefs.getString(protoKey, null)?.firstOrNull()) { step ->
+                        voltage = elm.voltage
+                        _conn.value = ConnState.Connecting(prefix + step)
+                    }
+                    prefs.edit().putString(protoKey, elm.protocol.code.toString()).apply()
+                    service = ObdService(elm)
+                    consecutiveTimeouts = 0
+                    _conn.value = ConnState.Connected(t.name, elm.protocol.title, elm.version, elm.voltage, warningsFor(elm))
+                    if (reconnect) {
+                        if (liveWanted) launchLive()
+                    } else {
+                        _live.update { it.copy(supported = emptyList(), values = emptyMap()) }
+                        _vehicle.value = null
+                        _readiness.value = null
+                        _dtc.value = DtcState()
+                        runCatching { loadSupported() }
+                        _live.update { it.copy(loading = false) }
+                        if (liveWanted) launchLive()
+                        readDtcs()
+                    }
+                    return@launch
+                } catch (e: CancellationException) {
+                    t.close()
+                    throw e
+                } catch (e: Exception) {
+                    t.close()
+                    transport = null
+                    service = null
+                    lastError = e
+                    if (e is ConnectProblem) stage = if (e.stage == ConnectProblem.Stage.CAR) FailStage.CAR else FailStage.ADAPTER
+                    if (e is ElmTimeoutException) stage = FailStage.ADAPTER
+                    if (attempt == attempts) {
+                        _conn.value = ConnState.Failed(
+                            humanError(e),
+                            if (reconnect && stage == FailStage.BLUETOOTH) FailStage.LOST else stage,
+                            (e as? ConnectProblem)?.tried ?: emptyList(),
+                            voltage,
+                        )
+                    } else {
+                        delay(2000)
+                    }
+                }
             }
         }
     }
 
+    private fun warningsFor(elm: Elm327): List<String> = buildList {
+        if (elm.version.contains("2.1")) {
+            add("Адаптер «v2.1» — почти всегда дешёвый клон с урезанными командами. При сбоях он первый подозреваемый.")
+        }
+        elm.voltage?.let { v ->
+            if (v < 11.8) add("Низкое напряжение: %.1f В. Слабый аккумулятор даёт ложные ошибки и обрывы связи.".format(v))
+        }
+    }
+
+    fun cancelConnect() = disconnect()
+
     fun disconnect() {
-        stopLive()
+        connectJob?.cancel()
+        connectJob = null
+        pauseLive()
+        closeTransport()
+        _conn.value = ConnState.Disconnected
+    }
+
+    private fun closeTransport() {
         transport?.close()
         transport = null
         service = null
-        _conn.value = ConnState.Disconnected
     }
 
     private fun appendLog(line: LogLine) {
@@ -181,24 +288,36 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun humanError(e: Throwable): String = when (e) {
-        is ElmTimeoutException -> "Адаптер не отвечает. Проверьте, что он вставлен в разъём OBD и зажигание включено."
+        is ElmTimeoutException -> "Адаптер перестал отвечать."
         is IOException -> e.message ?: "Связь с адаптером потеряна"
         else -> e.message ?: e.javaClass.simpleName
     }
 
-    /** Выполняет операцию с машиной; при потере связи переводит в состояние ошибки. */
+    /** Связь оборвалась посреди работы — тихо переподключаемся. */
+    private fun onConnectionLost() {
+        if (_conn.value !is ConnState.Connected) return
+        appendLog(LogLine(System.currentTimeMillis(), false, "⚠ связь потеряна, переподключение"))
+        start(reconnect = true)
+    }
+
+    /**
+     * Выполняет операцию с машиной. Обрыв Bluetooth или три таймаута подряд
+     * (клон «завис») запускают автоматическое переподключение.
+     */
     private suspend fun <T> withService(block: suspend (ObdService) -> T): T? {
         val s = service ?: return null
         return try {
-            block(s)
+            block(s).also { consecutiveTimeouts = 0 }
         } catch (e: CancellationException) {
             throw e
         } catch (e: IOException) {
-            transport?.close()
-            transport = null
-            service = null
-            _conn.value = ConnState.Failed("Связь с адаптером потеряна: ${e.message ?: ""}".trim())
+            onConnectionLost()
             null
+        } catch (e: ElmTimeoutException) {
+            if (++consecutiveTimeouts >= 3) {
+                onConnectionLost()
+                null
+            } else throw e
         }
     }
 
@@ -315,6 +434,11 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun startLive() {
+        liveWanted = true
+        launchLive()
+    }
+
+    private fun launchLive() {
         if (liveJob?.isActive == true || service == null) return
         liveJob = viewModelScope.launch {
             if (_live.value.supported.isEmpty()) loadSupported()
@@ -350,6 +474,11 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun stopLive() {
+        liveWanted = false
+        pauseLive()
+    }
+
+    private fun pauseLive() {
         liveJob?.cancel()
         liveJob = null
     }

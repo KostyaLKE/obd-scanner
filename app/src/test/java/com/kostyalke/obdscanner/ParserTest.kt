@@ -127,7 +127,7 @@ class ParserTest {
         val t = DemoTransport()
         t.open()
         val elm = Elm327(t) {}
-        elm.initialize {}
+        elm.initialize(null) {}
         assertEquals(ObdProtocol.KWP_FAST, elm.protocol)
         val obd = ObdService(elm)
 
@@ -149,5 +149,40 @@ class ParserTest {
         obd.clearDtcs()
         val after = obd.readDtcs()
         assertTrue(after.all.isEmpty())
+    }
+
+    @Test
+    fun protocolFallbackWithKw0() = runBlocking {
+        val t = DemoTransport(strictKeyword = true)
+        t.open()
+        val elm = Elm327(t) {}
+        elm.initialize(null) {}
+        assertEquals(ObdProtocol.KWP_FAST, elm.protocol)
+        assertEquals(13.9, elm.voltage!!, 0.2)
+        // Второй раз с запомненным протоколом подключается сразу.
+        val elm2 = Elm327(t) {}
+        elm2.initialize('5') {}
+        assertEquals(ObdProtocol.KWP_FAST, elm2.protocol)
+    }
+
+    @Test
+    fun noCarAnswerGivesTriedList() = runBlocking {
+        val t = object : com.kostyalke.obdscanner.elm.ObdTransport {
+            var last = ""
+            override val name = "x"
+            override suspend fun open() {}
+            override suspend fun write(text: String) { last = text.trim() }
+            override suspend fun readUntilPrompt(timeoutMs: Long) =
+                if (last.startsWith("AT")) "OK\r" else "UNABLE TO CONNECT\r"
+            override suspend fun clearInput() {}
+            override fun close() {}
+        }
+        try {
+            Elm327(t) {}.initialize(null) {}
+            org.junit.Assert.fail()
+        } catch (e: com.kostyalke.obdscanner.elm.ConnectProblem) {
+            assertEquals(com.kostyalke.obdscanner.elm.ConnectProblem.Stage.CAR, e.stage)
+            assertEquals(8, e.tried.size)
+        }
     }
 }
