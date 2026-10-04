@@ -14,6 +14,8 @@ import com.kostyalke.obdscanner.obd.Pids
 import com.kostyalke.obdscanner.obd.Readiness
 import com.kostyalke.obdscanner.obd.VehicleInfo
 import com.kostyalke.obdscanner.ui.*
+import androidx.compose.foundation.layout.padding
+import androidx.compose.ui.unit.dp
 import org.junit.Rule
 import org.junit.Test
 import java.io.File
@@ -60,19 +62,20 @@ class ScreenShots {
 
     private fun shell(tab: Tab, errors: Int = 2, content: @Composable () -> Unit) = @Composable {
         AppScaffold(tab.title, conn, tab, errors, showTabs = true, showBack = false,
-            onBack = {}, onTab = {}, onLog = {}, onHistory = {}, onDisconnect = {}) { content() }
+            onBack = {}, onTab = {}, onLog = {}, onHistory = {}, onDisconnect = {},
+            onShare = if (tab == Tab.ERRORS) ({}) else null) { content() }
     }
 
     @Test fun errors() = listOf(true, false).forEach { dark ->
         shot("01_errors", dark, shell(Tab.ERRORS) {
-            ErrorsContent(DtcState(report = report), conn.warnings, db::info, {}, {}, {}, {})
+            ErrorsContent(DtcState(report = report), conn.warnings, db::info, {}, {}, {})
         })
     }
 
     @Test fun errorsNone() = shot("02_errors_none", true, shell(Tab.ERRORS, 0) {
         ErrorsContent(DtcState(report = report.copy(stored = emptyList(), pending = emptyList(),
             readiness = readiness.copy(milOn = false, dtcCount = 0), freezeFrame = null, notes = emptyList())),
-            emptyList(), db::info, {}, {}, {}, {})
+            emptyList(), db::info, {}, {}, {})
     })
 
     @Test fun live() = listOf(true, false).forEach { dark ->
@@ -96,7 +99,7 @@ class ScreenShots {
 
     @Test fun vehicle() = shot("05_vehicle", false, shell(Tab.CAR) {
         VehicleContent(VehicleInfo(null, emptyList(), null, "EOBD (Европа)", conn.protocol, conn.elmVersion, "12.4V"),
-            conn, false) {}
+            conn.copy(deviceName = "Демо: Skoda Fabia 1.9 TDI"), false) {}
     })
 
     @Test fun connect() = listOf(true, false).forEach { dark ->
@@ -150,6 +153,20 @@ class ScreenShots {
             ConnectContent(ConnState.Disconnected, BtAccess.OK,
                 listOf(PairedDevice("LC-B41", "00:12:12:43:A0:54"), PairedDevice("LC-B45", "00:12:12:AA:B5:DC")),
                 null, true, {}, {}, {}, {}, {}, {})
+        }
+    })
+
+    @Test fun infoRows() = shot("11_inforows", false, @Composable {
+        androidx.compose.foundation.layout.Column(androidx.compose.ui.Modifier.padding(16.dp)) {
+            Panel {
+                InfoRow("Адаптер", "Демо: Skoda Fabia 1.9 TDI")
+                PanelDivider()
+                InfoRow("Версия", "ELM327 v1.5 (демо)")
+                PanelDivider()
+                InfoRow("Протокол", "ISO 14230-4 KWP2000, быстрая инициализация (K-line)")
+                PanelDivider()
+                InfoRow("Напряжение", "14,0 В")
+            }
         }
     })
 }

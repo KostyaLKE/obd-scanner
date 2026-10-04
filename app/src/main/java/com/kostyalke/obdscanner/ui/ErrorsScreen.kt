@@ -25,7 +25,10 @@ import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButtonDefaults
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedIconButton
@@ -60,7 +63,6 @@ fun ErrorsContent(
     info: (String) -> DtcInfo,
     onRead: () -> Unit,
     onClear: () -> Unit,
-    onShare: () -> Unit,
     onSearch: (String) -> Unit,
 ) {
     var confirmClear by remember { mutableStateOf(false) }
@@ -114,18 +116,21 @@ fun ErrorsContent(
             }
         }
         ActionBar {
-            Button(onClick = onRead, enabled = !busy, modifier = Modifier.weight(1f).heightIn(min = 48.dp)) {
-                Text(if (report == null) "Прочитать ошибки" else "Прочитать снова")
+            Button(onClick = onRead, enabled = !busy, modifier = Modifier.weight(1f).heightIn(min = 48.dp),
+                contentPadding = ButtonPadding) {
+                Text(if (report == null) "Прочитать ошибки" else "Прочитать", maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
-            OutlinedIconButton(onClick = onShare, enabled = report != null && !busy, modifier = Modifier.size(48.dp)) {
-                Icon(Icons.Filled.Share, contentDescription = "Поделиться отчётом")
+            if (report != null) {
+                // Словами, не значком: корзину многие не понимают. Красный — действие необратимое.
+                OutlinedButton(
+                    onClick = { confirmClear = true },
+                    enabled = !busy,
+                    modifier = Modifier.heightIn(min = 48.dp),
+                    contentPadding = ButtonPadding,
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Status.colors.error.accent),
+                    border = BorderStroke(1.dp, Status.colors.error.accent.copy(alpha = if (busy) 0.3f else 0.7f)),
+                ) { Text("Сбросить ошибки", maxLines = 1, overflow = TextOverflow.Ellipsis) }
             }
-            OutlinedIconButton(
-                onClick = { confirmClear = true },
-                enabled = report != null && !busy,
-                modifier = Modifier.size(48.dp),
-                colors = IconButtonDefaults.outlinedIconButtonColors(contentColor = Status.colors.error.accent),
-            ) { Icon(Icons.Filled.Delete, contentDescription = "Стереть ошибки") }
         }
     }
 
@@ -133,7 +138,7 @@ fun ErrorsContent(
         AlertDialog(
             onDismissRequest = { confirmClear = false },
             icon = { Icon(Icons.Filled.Delete, null, tint = Status.colors.error.accent) },
-            title = { Text("Стереть ошибки?") },
+            title = { Text("Сбросить ошибки?") },
             text = {
                 Text(
                     "Заглушите двигатель, зажигание оставьте включённым.\n\n" +
@@ -144,7 +149,7 @@ fun ErrorsContent(
             },
             confirmButton = {
                 TextButton(onClick = { confirmClear = false; onClear() }) {
-                    Text("Стереть", color = Status.colors.error.accent)
+                    Text("Сбросить", color = Status.colors.error.accent)
                 }
             },
             dismissButton = { TextButton(onClick = { confirmClear = false }) { Text("Отмена") } },

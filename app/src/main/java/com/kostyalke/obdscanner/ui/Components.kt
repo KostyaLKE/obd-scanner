@@ -23,6 +23,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 
 val ScreenPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp)
@@ -111,15 +112,26 @@ fun StatusNote(
 /** Строка «подпись — значение» внутри панели. */
 @Composable
 fun InfoRow(label: String, value: String?, modifier: Modifier = Modifier) {
+    val text = value ?: "—"
+    // Длинное значение (протокол, имя адаптера) — под подписью, иначе оно сжимает подпись в столбик.
+    if (text.length > 18) {
+        Column(modifier.fillMaxWidth().heightIn(min = 48.dp).padding(horizontal = 16.dp, vertical = 10.dp)) {
+            Text(label, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Spacer(Modifier.size(2.dp))
+            Text(text, style = MaterialTheme.typography.bodyLarge.merge(Tabular), fontWeight = FontWeight.Medium,
+                color = MaterialTheme.colorScheme.onSurface)
+        }
+        return
+    }
     Row(
         modifier.fillMaxWidth().heightIn(min = 48.dp).padding(horizontal = 16.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(label, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.weight(1f))
+        // Подпись меряется первой и получает свою ширину целиком; значение — остаток справа.
+        Text(label, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Spacer(Modifier.width(12.dp))
-        Text(value ?: "—", style = MaterialTheme.typography.bodyLarge.merge(Tabular), fontWeight = FontWeight.Medium,
-            color = MaterialTheme.colorScheme.onSurface)
+        Text(text, style = MaterialTheme.typography.bodyLarge.merge(Tabular), fontWeight = FontWeight.Medium,
+            color = MaterialTheme.colorScheme.onSurface, textAlign = TextAlign.End, modifier = Modifier.weight(1f))
     }
 }
 

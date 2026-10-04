@@ -24,6 +24,7 @@ import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material.icons.filled.Warning
@@ -127,6 +128,9 @@ private fun App(vm: AppViewModel) {
         autoUpdate = autoUpdate,
         onAutoUpdate = { autoUpdate = it; vm.autoUpdate = it },
         onCheckUpdate = { vm.checkForUpdate(manual = true) },
+        onShare = if (connected != null && tab == Tab.ERRORS && overlay == Overlay.NONE && dtc.report != null) {
+            { vm.buildReportText()?.let { ctx.shareText("Отправить отчёт", it) } }
+        } else null,
         banner = {
             UpdateBanner(
                 update,
@@ -163,7 +167,6 @@ private fun App(vm: AppViewModel) {
                     info = vm.db::info,
                     onRead = vm::readDtcs,
                     onClear = vm::clearDtcs,
-                    onShare = { vm.buildReportText()?.let { ctx.shareText("Отправить отчёт", it) } },
                     onSearch = { q ->
                         val url = "https://www.google.com/search?q=" + java.net.URLEncoder.encode(q, "UTF-8")
                         runCatching { ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
@@ -214,6 +217,7 @@ fun AppScaffold(
     autoUpdate: Boolean = true,
     onAutoUpdate: (Boolean) -> Unit = {},
     onCheckUpdate: () -> Unit = {},
+    onShare: (() -> Unit)? = null,
     banner: @Composable () -> Unit = {},
     content: @Composable () -> Unit,
 ) {
@@ -235,6 +239,9 @@ fun AppScaffold(
                     }
                 },
                 actions = {
+                    if (onShare != null) IconButton(onClick = onShare) {
+                        Icon(Icons.Filled.Share, contentDescription = "Поделиться отчётом")
+                    }
                     if (!showBack) {
                         Box {
                             IconButton(onClick = { menu = true }) { Icon(Icons.Filled.MoreVert, contentDescription = "Меню") }
