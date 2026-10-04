@@ -16,6 +16,9 @@ class HistoryStore(context: Context) {
         val name = SimpleDateFormat("yyyy-MM-dd_HH-mm-ss", Locale.US).format(Date(time)) + ".txt"
         val f = File(dir, name)
         f.writeText(text)
+        // Храним последние 100 отчётов.
+        (dir.listFiles { x -> x.name.endsWith(".txt") } ?: emptyArray())
+            .sortedByDescending { it.name }.drop(100).forEach { it.delete() }
         return SavedReport(f, titleOf(f), text)
     }
 

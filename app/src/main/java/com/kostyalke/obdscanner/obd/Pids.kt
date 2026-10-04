@@ -8,7 +8,24 @@ class PidDef(
     val bytes: Int,
     val decimals: Int = 0,
     val decode: (IntArray) -> Double,
-)
+) {
+    /** Короткое имя для плитки на экране телефона. */
+    val short: String get() = SHORT[pid] ?: name
+
+    private companion object {
+        val SHORT = mapOf(
+            0x0C to "Обороты", 0x0D to "Скорость", 0x05 to "Температура ОЖ", 0x04 to "Нагрузка",
+            0x0B to "Давление наддува", 0x33 to "Атм. давление", 0x10 to "Расход воздуха",
+            0x0F to "Воздух на впуске", 0x46 to "Наружный воздух", 0x5C to "Температура масла",
+            0x11 to "Дроссель / педаль", 0x49 to "Педаль газа D", 0x4A to "Педаль газа E",
+            0x45 to "Дроссель отн.", 0x43 to "Абс. нагрузка", 0x0E to "Угол опережения",
+            0x23 to "Давление в рампе", 0x22 to "Рампа отн.", 0x0A to "Давление топлива",
+            0x5E to "Расход топлива", 0x2F to "Уровень топлива", 0x2C to "EGR задано",
+            0x2D to "Отклонение EGR", 0x06 to "Коррекция кратк.", 0x07 to "Коррекция долг.",
+            0x42 to "Напряжение блока", 0x1F to "С момента запуска",
+        )
+    }
+}
 
 object Pids {
     private fun a(d: IntArray) = d[0].toDouble()

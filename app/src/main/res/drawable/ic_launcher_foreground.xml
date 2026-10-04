@@ -2,9 +2,11 @@
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp" android:height="108dp"
     android:viewportWidth="108" android:viewportHeight="108">
-    <!-- Разъём OBD: трапеция с контактами -->
-    <path android:fillColor="#FFFFFF"
+    <!-- Разъём OBD: трапеция с контактами, контакты — цвет действия -->
+    <path android:fillColor="#E7EBF0"
         android:pathData="M30,40 L78,40 L72,68 L36,68 Z" />
-    <path android:fillColor="#1A5FB4"
-        android:pathData="M38,47h4v4h-4z M46,47h4v4h-4z M54,47h4v4h-4z M62,47h4v4h-4z M40,57h4v4h-4z M48,57h4v4h-4z M56,57h4v4h-4z M64,57h4v4h-4z" />
+    <path android:fillColor="#161A1F"
+        android:pathData="M33.5,43.5 L74.5,43.5 L69.6,64.5 L38.4,64.5 Z" />
+    <path android:fillColor="#5AAEFF"
+        android:pathData="M39,47h4v4h-4z M47,47h4v4h-4z M55,47h4v4h-4z M63,47h4v4h-4z M41,57h4v4h-4z M49,57h4v4h-4z M57,57h4v4h-4z M65,57h4v4h-4z" />
 </vector>

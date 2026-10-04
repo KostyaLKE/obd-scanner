@@ -1,6 +1,5 @@
 package com.kostyalke.obdscanner.ui
 
-import android.content.Intent
 import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -10,21 +9,26 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButtonDefaults
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedIconButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -36,14 +40,13 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.kostyalke.obdscanner.obd.Dtc
+import com.kostyalke.obdscanner.obd.DtcInfo
 import com.kostyalke.obdscanner.obd.DtcKind
+import com.kostyalke.obdscanner.obd.DtcReport
 import com.kostyalke.obdscanner.obd.FreezeFrame
 import com.kostyalke.obdscanner.obd.Pids
 import java.text.SimpleDateFormat
@@ -51,108 +54,98 @@ import java.util.Date
 import java.util.Locale
 
 @Composable
-fun ErrorsScreen(vm: AppViewModel, onOpenHistory: () -> Unit) {
-    val st by vm.dtc.collectAsStateWithLifecycle()
-    val ctx = LocalContext.current
+fun ErrorsContent(
+    st: DtcState,
+    warnings: List<String>,
+    info: (String) -> DtcInfo,
+    onRead: () -> Unit,
+    onClear: () -> Unit,
+    onShare: () -> Unit,
+    onSearch: (String) -> Unit,
+) {
     var confirmClear by remember { mutableStateOf(false) }
     val report = st.report
+    val busy = st.loading || st.clearing
 
-    LazyColumn(
-        Modifier.fillMaxSize(),
-        contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp),
-    ) {
-        item {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                Button(onClick = { vm.readDtcs() }, enabled = !st.loading && !st.clearing) {
-                    Text(if (report == null) "Прочитать ошибки" else "Прочитать снова")
-                }
-                OutlinedButton(
-                    onClick = { confirmClear = true },
-                    enabled = !st.loading && !st.clearing && report != null,
-                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Danger),
-                ) { Text("Стереть") }
-                if (st.loading || st.clearing) CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 3.dp)
+    Column(Modifier.fillMaxSize()) {
+        if (busy) LinearProgressIndicator(Modifier.fillMaxWidth()) else Spacer(Modifier.height(4.dp))
+        LazyColumn(
+            Modifier.weight(1f),
+            contentPadding = ScreenPadding,
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            item { SummaryPanel(report, st.loading) }
+            warnings.forEach { w ->
+                item { StatusNote(w, Status.colors.warning, Icons.Filled.Warning, compact = true) }
             }
-        }
-        (vm.conn.value as? ConnState.Connected)?.warnings?.forEach { w ->
-            item { Banner("⚠ $w", Warning.copy(alpha = 0.18f), MaterialTheme.colorScheme.onSurface) }
-        }
-        st.error?.let { item { Banner(it, MaterialTheme.colorScheme.errorContainer, MaterialTheme.colorScheme.onErrorContainer) } }
-        st.message?.let { item { Banner(it, MaterialTheme.colorScheme.secondaryContainer, MaterialTheme.colorScheme.onSecondaryContainer) } }
+            st.error?.let { item { StatusNote(it, Status.colors.error, AppIcons.Error) } }
+            st.message?.let { item { StatusNote(it, Status.colors.ok, Icons.Filled.CheckCircle) } }
 
-        if (report != null) {
-            item { SummaryCard(report.readiness?.milOn, report.all.size, report.time) }
-            if (report.all.isEmpty()) {
-                item {
-                    Banner("Ошибок нет 👍", Ok.copy(alpha = 0.15f), MaterialTheme.colorScheme.onSurface)
-                }
-            }
-            for (kind in DtcKind.entries) {
-                val list = report.all.filter { it.kind == kind }
-                if (list.isEmpty()) continue
-                item {
-                    Text(
-                        "${kind.title} · ${list.size}",
-                        style = MaterialTheme.typography.titleMedium,
-                        modifier = Modifier.padding(top = 6.dp),
-                    )
-                }
-                items(list, key = { "${it.kind}-${it.ecu}-${it.code}" }) { d ->
-                    DtcCard(vm, d, report.freezeFrame?.takeIf { ff -> ff.dtc == d.code && d.kind == DtcKind.STORED })
-                }
-            }
-            report.freezeFrame?.let { ff ->
-                if (report.all.none { it.code == ff.dtc }) item { FreezeFrameCard(ff) }
-            }
-            if (report.notes.isNotEmpty()) {
-                item {
-                    Text(
-                        report.notes.joinToString("\n") { "• $it" },
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-            }
-            item {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(onClick = {
-                        val text = vm.buildReportText() ?: return@OutlinedButton
-                        val send = Intent(Intent.ACTION_SEND).apply {
-                            type = "text/plain"
-                            putExtra(Intent.EXTRA_TEXT, text)
+            if (report != null) {
+                for (kind in DtcKind.entries) {
+                    val list = report.all.filter { it.kind == kind }
+                    if (list.isEmpty()) continue
+                    item(key = "title-$kind") { SectionTitle(kind.title, trailing = list.size.toString()) }
+                    item(key = "list-$kind") {
+                        Panel {
+                            list.forEachIndexed { i, d ->
+                                if (i > 0) PanelDivider()
+                                DtcRow(d, info(d.code), report.freezeFrame?.takeIf { it.dtc == d.code && d.kind == DtcKind.STORED }, onSearch)
+                            }
                         }
-                        ctx.startActivity(Intent.createChooser(send, "Отправить отчёт"))
-                    }) { Text("Поделиться") }
-                    OutlinedButton(onClick = { vm.saveReport() }) { Text("Сохранить") }
-                    TextButton(onClick = onOpenHistory) { Text("История") }
+                    }
+                }
+                report.freezeFrame?.let { ff ->
+                    if (report.all.none { it.code == ff.dtc }) {
+                        item { SectionTitle("Стоп-кадр") }
+                        item { Panel { Column(Modifier.padding(16.dp)) { FreezeFrameTable(ff) } } }
+                    }
+                }
+                if (report.notes.isNotEmpty()) {
+                    item {
+                        Row(Modifier.padding(top = 12.dp, start = 4.dp, end = 4.dp)) {
+                            Icon(Icons.Filled.Info, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Spacer(Modifier.width(8.dp))
+                            Text(report.notes.joinToString("\n"), style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
                 }
             }
-        } else if (!st.loading) {
-            item {
-                Text(
-                    "Нажмите «Прочитать ошибки». Чтение на K-line (старые Skoda/VW) может занять 10–20 секунд.",
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+        }
+        ActionBar {
+            Button(onClick = onRead, enabled = !busy, modifier = Modifier.weight(1f).heightIn(min = 48.dp)) {
+                Text(if (report == null) "Прочитать ошибки" else "Прочитать снова")
             }
+            OutlinedIconButton(onClick = onShare, enabled = report != null && !busy, modifier = Modifier.size(48.dp)) {
+                Icon(Icons.Filled.Share, contentDescription = "Поделиться отчётом")
+            }
+            OutlinedIconButton(
+                onClick = { confirmClear = true },
+                enabled = report != null && !busy,
+                modifier = Modifier.size(48.dp),
+                colors = IconButtonDefaults.outlinedIconButtonColors(contentColor = Status.colors.error.accent),
+            ) { Icon(Icons.Filled.Delete, contentDescription = "Стереть ошибки") }
         }
     }
 
     if (confirmClear) {
         AlertDialog(
             onDismissRequest = { confirmClear = false },
+            icon = { Icon(Icons.Filled.Delete, null, tint = Status.colors.error.accent) },
             title = { Text("Стереть ошибки?") },
             text = {
                 Text(
-                    "• Заглушите двигатель, зажигание оставьте включённым.\n" +
-                        "• Вместе с ошибками сотрутся стоп-кадры и статусы готовности систем — " +
-                        "машина «забудет», что проверки пройдены.\n" +
-                        "• Если неисправность не устранена, ошибка вернётся.\n\n" +
-                        "Совет: сначала нажмите «Сохранить», чтобы отчёт остался в истории."
+                    "Заглушите двигатель, зажигание оставьте включённым.\n\n" +
+                        "Вместе с ошибками сотрутся стоп-кадры и готовность самопроверок. " +
+                        "Если неисправность не устранена, ошибка вернётся.\n\n" +
+                        "Текущий отчёт уже сохранён в истории."
                 )
             },
             confirmButton = {
-                TextButton(onClick = { confirmClear = false; vm.clearDtcs() }) { Text("Стереть", color = Danger) }
+                TextButton(onClick = { confirmClear = false; onClear() }) {
+                    Text("Стереть", color = Status.colors.error.accent)
+                }
             },
             dismissButton = { TextButton(onClick = { confirmClear = false }) { Text("Отмена") } },
         )
@@ -160,133 +153,166 @@ fun ErrorsScreen(vm: AppViewModel, onOpenHistory: () -> Unit) {
 }
 
 @Composable
-fun Banner(text: String, bg: Color, fg: Color) {
-    Surface(color = bg, shape = RoundedCornerShape(12.dp), modifier = Modifier.fillMaxWidth()) {
-        Text(text, Modifier.padding(14.dp), color = fg)
-    }
-}
-
-@Composable
-private fun SummaryCard(milOn: Boolean?, count: Int, time: Long) {
-    Card(Modifier.fillMaxWidth()) {
-        Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-            val color = when {
-                milOn == true -> Warning
-                count > 0 -> Warning.copy(alpha = 0.6f)
-                else -> Ok
+private fun SummaryPanel(report: DtcReport?, loading: Boolean) {
+    if (report == null) {
+        val tone = Status.colors.neutral
+        Surface(Modifier.fillMaxWidth(), shape = PanelShape, color = MaterialTheme.colorScheme.surfaceContainer) {
+            Column(Modifier.padding(20.dp)) {
+                Text(if (loading) "Читаю ошибки…" else "Ошибки ещё не читались",
+                    style = MaterialTheme.typography.titleLarge, color = tone.onContainer)
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    "На старых VAG с K-line чтение занимает 10–20 секунд.",
+                    style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
-            Surface(color = color, shape = RoundedCornerShape(50), modifier = Modifier.size(14.dp)) {}
-            Spacer(Modifier.width(12.dp))
+        }
+        return
+    }
+    val confirmed = report.stored.size + report.permanent.size
+    val pending = report.pending.size
+    val mil = report.readiness?.milOn
+    val tone = when {
+        confirmed > 0 -> Status.colors.error
+        pending > 0 || mil == true -> Status.colors.warning
+        else -> Status.colors.ok
+    }
+    val title = when {
+        confirmed > 0 -> "$confirmed ${plural(confirmed, "ошибка", "ошибки", "ошибок")}"
+        pending > 0 -> "$pending ${plural(pending, "ожидающая", "ожидающие", "ожидающих")}"
+        else -> "Ошибок нет"
+    }
+    val sub = buildList {
+        if (confirmed > 0 && pending > 0) add("ещё $pending ${plural(pending, "ожидающая", "ожидающие", "ожидающих")}")
+        when (mil) {
+            true -> add("Check Engine горит")
+            false -> add("Check Engine не горит")
+            null -> {}
+        }
+        add("прочитано в " + SimpleDateFormat("HH:mm", Locale.US).format(Date(report.time)))
+    }.joinToString(" · ")
+    Surface(Modifier.fillMaxWidth(), shape = PanelShape, color = tone.container) {
+        Row(Modifier.padding(20.dp), verticalAlignment = Alignment.CenterVertically) {
+            Icon(
+                if (tone == Status.colors.ok) Icons.Filled.CheckCircle else AppIcons.Error,
+                contentDescription = null, tint = tone.accent, modifier = Modifier.size(32.dp),
+            )
+            Spacer(Modifier.width(16.dp))
             Column {
-                Text(
-                    when (milOn) {
-                        true -> "Check Engine горит"
-                        false -> "Check Engine не горит"
-                        null -> "Состояние Check Engine неизвестно"
-                    },
-                    fontWeight = FontWeight.SemiBold,
-                )
-                Text(
-                    "Найдено кодов: $count · " + SimpleDateFormat("HH:mm:ss", Locale.US).format(Date(time)),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+                Text(title, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold, color = tone.onContainer)
+                Text(sub, style = MaterialTheme.typography.bodyMedium, color = tone.onContainer)
             }
         }
     }
 }
 
 @Composable
-private fun DtcCard(vm: AppViewModel, d: Dtc, ff: FreezeFrame?) {
-    val info = remember(d.code) { vm.db.info(d.code) }
-    val ctx = LocalContext.current
+private fun DtcRow(d: Dtc, info: DtcInfo, ff: FreezeFrame?, onSearch: (String) -> Unit) {
     var expanded by rememberSaveable(d.code, d.kind) { mutableStateOf(false) }
-    val accent = when (d.kind) {
-        DtcKind.STORED -> Danger
-        DtcKind.PENDING -> Warning
-        DtcKind.PERMANENT -> Danger
-    }
-    Card(
-        Modifier.fillMaxWidth().animateContentSize().clickable { expanded = !expanded },
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh),
+    val tone = if (d.kind == DtcKind.PENDING) Status.colors.warning else Status.colors.error
+    Column(
+        Modifier.fillMaxWidth().animateContentSize().clickable { expanded = !expanded }
+            .padding(start = 16.dp, end = 8.dp, top = 14.dp, bottom = 14.dp)
     ) {
-        Column(Modifier.padding(14.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    d.code,
-                    fontFamily = FontFamily.Monospace,
-                    fontWeight = FontWeight.Bold,
-                    style = MaterialTheme.typography.titleLarge,
-                    color = accent,
-                )
-                info.vagCode?.let {
-                    Spacer(Modifier.width(10.dp))
-                    Text("VAG $it", fontFamily = FontFamily.Monospace, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-                Spacer(Modifier.weight(1f))
-                Text(d.ecu, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(d.code, style = MaterialTheme.typography.titleLarge, fontFamily = FontFamily.Monospace,
+                fontWeight = FontWeight.Bold, color = tone.accent)
+            info.vagCode?.let {
+                Spacer(Modifier.width(10.dp))
+                Text("VAG $it", style = MaterialTheme.typography.labelLarge.merge(Tabular),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
-            Spacer(Modifier.height(4.dp))
-            Text(info.description ?: "Расшифровки нет в базе", style = MaterialTheme.typography.bodyLarge)
-            Text(info.system, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            if (expanded) {
-                info.hint?.let {
-                    Spacer(Modifier.height(8.dp))
-                    Text("Возможные причины", fontWeight = FontWeight.SemiBold)
-                    Text(it, style = MaterialTheme.typography.bodyMedium)
+            Spacer(Modifier.weight(1f))
+            Icon(
+                if (expanded) AppIcons.ExpandLess else AppIcons.ExpandMore,
+                contentDescription = if (expanded) "Свернуть" else "Подробнее",
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(8.dp),
+            )
+        }
+        Text(info.description ?: "Расшифровки нет в базе", style = MaterialTheme.typography.bodyLarge,
+            color = MaterialTheme.colorScheme.onSurface, modifier = Modifier.padding(end = 8.dp))
+        Spacer(Modifier.height(2.dp))
+        Text("${shortSystem(d.code, info.system)} · ${d.ecu}", style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(end = 8.dp))
+
+        if (expanded) {
+            Spacer(Modifier.height(12.dp))
+            Surface(
+                color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                shape = RoundedCornerShape(12.dp),
+                modifier = Modifier.fillMaxWidth().padding(end = 8.dp),
+            ) {
+                Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    info.hint?.let {
+                        Column {
+                            Text("Возможные причины", style = MaterialTheme.typography.labelLarge,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Spacer(Modifier.height(4.dp))
+                            Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurface)
+                        }
+                    }
+                    if (d.kind == DtcKind.PENDING) {
+                        Text(
+                            "Ожидающая: блок заметил проблему, но ещё не подтвердил. Повторится — станет " +
+                                "сохранённой и может зажечь Check Engine.",
+                            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    ff?.let { FreezeFrameTable(it) }
+                    if (info.hint == null && ff == null && d.kind != DtcKind.PENDING) {
+                        Text("Подробностей по этому коду в базе нет.", style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
                 }
-                if (d.kind == DtcKind.PENDING) {
-                    Spacer(Modifier.height(8.dp))
-                    Text(
-                        "Ожидающая ошибка: блок заметил проблему в текущем или прошлом цикле поездки, но ещё не " +
-                            "подтвердил её. Если повторится — станет сохранённой и может зажечь Check Engine.",
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                }
-                ff?.let {
-                    Spacer(Modifier.height(8.dp))
-                    HorizontalDivider()
-                    Spacer(Modifier.height(8.dp))
-                    FreezeFrameBody(it)
-                }
-                Spacer(Modifier.height(8.dp))
-                TextButton(onClick = {
-                    val q = info.vagCode?.let { v -> "VAG $v ${d.code} Skoda Fabia" } ?: "${d.code} Skoda Fabia"
-                    val url = "https://www.google.com/search?q=" + java.net.URLEncoder.encode(q, "UTF-8")
-                    runCatching { ctx.startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse(url))) }
-                }) { Text("Искать в интернете") }
-            } else if (info.hint != null || ff != null) {
-                Text(
-                    "Нажмите, чтобы увидеть возможные причины" + if (ff != null) " и стоп-кадр" else "",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.padding(top = 6.dp),
-                )
+            }
+            TextButton(onClick = {
+                onSearch(info.vagCode?.let { v -> "VAG $v ${d.code} Skoda" } ?: "${d.code} Skoda")
+            }) {
+                Icon(Icons.Filled.Search, null, Modifier.size(18.dp))
+                Spacer(Modifier.width(8.dp))
+                Text("Искать в интернете")
             }
         }
     }
 }
 
 @Composable
-private fun FreezeFrameCard(ff: FreezeFrame) {
-    Card(Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(14.dp)) { FreezeFrameBody(ff) }
+private fun FreezeFrameTable(ff: FreezeFrame) {
+    Column {
+        Text(
+            "Стоп-кадр${ff.dtc?.let { " · $it" } ?: ""}",
+            style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Text("Параметры в момент появления ошибки", style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Spacer(Modifier.height(6.dp))
+        for ((def, v) in ff.values) {
+            Row(Modifier.fillMaxWidth().padding(vertical = 3.dp)) {
+                Text(def.name, Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurface)
+                Spacer(Modifier.width(12.dp))
+                Text("${Pids.format(def, v)} ${def.unit}".trim(), style = MaterialTheme.typography.bodyMedium.merge(Tabular),
+                    fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurface)
+            }
+        }
     }
 }
 
-@Composable
-private fun FreezeFrameBody(ff: FreezeFrame) {
-    Text("Стоп-кадр${ff.dtc?.let { " ($it)" } ?: ""}", fontWeight = FontWeight.SemiBold)
-    Text(
-        "Параметры двигателя в момент, когда ошибка была зафиксирована",
-        style = MaterialTheme.typography.bodySmall,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-    )
-    Spacer(Modifier.height(6.dp))
-    for ((def, v) in ff.values) {
-        Row(Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
-            Text(def.name, Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
-            Text("${Pids.format(def, v)} ${def.unit}", fontWeight = FontWeight.SemiBold)
-        }
+/** «Двигатель/трансмиссия · стандартный код · топливо и воздух» → «Топливо и воздух» (+ «код VAG»). */
+private fun shortSystem(code: String, system: String): String {
+    val parts = system.split(" · ")
+    val main = (parts.getOrNull(2) ?: parts.firstOrNull() ?: "").replaceFirstChar { it.uppercase() }
+    return if (parts.getOrNull(1) == "код производителя") "$main · код VAG" else main
+}
+
+fun plural(n: Int, one: String, few: String, many: String): String {
+    val m100 = n % 100
+    val m10 = n % 10
+    return when {
+        m100 in 11..14 -> many
+        m10 == 1 -> one
+        m10 in 2..4 -> few
+        else -> many
     }
 }

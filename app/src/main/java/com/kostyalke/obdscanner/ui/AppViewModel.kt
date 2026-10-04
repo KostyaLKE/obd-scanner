@@ -256,10 +256,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun warningsFor(elm: Elm327): List<String> = buildList {
         if (elm.version.contains("2.1")) {
-            add("Адаптер «v2.1» — почти всегда дешёвый клон с урезанными командами. При сбоях он первый подозреваемый.")
+            add("Адаптер v2.1 — скорее всего урезанный клон. При сбоях подозревайте его первым.")
         }
         elm.voltage?.let { v ->
-            if (v < 11.8) add("Низкое напряжение: %.1f В. Слабый аккумулятор даёт ложные ошибки и обрывы связи.".format(v))
+            if (v < 11.8) add("Низкое напряжение: %.1f В. Слабый аккумулятор даёт ложные ошибки и обрывы связи.".format(Ru, v))
         }
     }
 
@@ -332,6 +332,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 if (r != null) {
                     _dtc.update { it.copy(report = r) }
                     _readiness.value = r.readiness
+                    autoSave()
                 }
             } catch (e: CancellationException) {
                 throw e
@@ -369,13 +370,17 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         return ReportFormatter.format(r, _vehicle.value, (_conn.value as? ConnState.Connected), db)
     }
 
-    fun saveReport(): Boolean {
-        val r = _dtc.value.report ?: return false
-        val text = buildReportText() ?: return false
-        history.save(text, r.time)
+    /** Каждое чтение ошибок попадает в историю — форумчане жалуются, что «забыл сохранить». */
+    private fun autoSave() {
+        val r = _dtc.value.report ?: return
+        val text = buildReportText() ?: return
+        runCatching { history.save(text, r.time) }
         refreshReports()
-        _dtc.update { it.copy(message = "Отчёт сохранён в истории") }
-        return true
+    }
+
+    fun shareLog(): String {
+        val fmt = java.text.SimpleDateFormat("HH:mm:ss.SSS", java.util.Locale.US)
+        return _log.value.joinToString("\n") { "${fmt.format(java.util.Date(it.time))} ${if (it.outgoing) ">>" else "<<"} ${it.text}" }
     }
 
     fun refreshReports() {

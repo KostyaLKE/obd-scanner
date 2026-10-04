@@ -81,3 +81,9 @@ dependencies {
 
     testImplementation("junit:junit:4.13.2")
 }
+
+// Скриншот-тесты подключаются только по флагу, чтобы не мешать обычной сборке и CI.
+if (project.hasProperty("screenshots")) {
+    apply(plugin = "app.cash.paparazzi")
+    android.sourceSets.getByName("test").java.srcDir("src/screenshotTest/java")
+}
