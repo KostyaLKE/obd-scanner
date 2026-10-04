@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <!-- Разъём OBD: трапеция с контактами -->
+    <path android:fillColor="#FFFFFF"
+        android:pathData="M30,40 L78,40 L72,68 L36,68 Z" />
+    <path android:fillColor="#1A5FB4"
+        android:pathData="M38,47h4v4h-4z M46,47h4v4h-4z M54,47h4v4h-4z M62,47h4v4h-4z M40,57h4v4h-4z M48,57h4v4h-4z M56,57h4v4h-4z M64,57h4v4h-4z" />
+</vector>

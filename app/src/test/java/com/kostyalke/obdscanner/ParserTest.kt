@@ -1,0 +1,153 @@
+package com.kostyalke.obdscanner
+
+import com.kostyalke.obdscanner.elm.DemoTransport
+import com.kostyalke.obdscanner.elm.Elm327
+import com.kostyalke.obdscanner.elm.ObdProtocol
+import com.kostyalke.obdscanner.obd.DtcDecoder
+import com.kostyalke.obdscanner.obd.DtcKind
+import com.kostyalke.obdscanner.obd.MonitorState
+import com.kostyalke.obdscanner.obd.ObdService
+import com.kostyalke.obdscanner.obd.Pids
+import com.kostyalke.obdscanner.obd.Readiness
+import com.kostyalke.obdscanner.obd.ResponseParser
+import kotlinx.coroutines.runBlocking
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+class ParserTest {
+
+    @Test
+    fun dtcDecoding() {
+        assertEquals("P0133", DtcDecoder.decode(0x01, 0x33))
+        assertEquals("P1557", DtcDecoder.decode(0x15, 0x57))
+        assertEquals("C0300", DtcDecoder.decode(0x43, 0x00))
+        assertEquals("B1234", DtcDecoder.decode(0x92, 0x34))
+        assertEquals("U0100", DtcDecoder.decode(0xC1, 0x00))
+        assertEquals("P2A01", DtcDecoder.decode(0x2A, 0x01))
+    }
+
+    @Test
+    fun vagCodes() {
+        assertEquals(16485, DtcDecoder.vagCode("P0101"))
+        assertEquals(17965, DtcDecoder.vagCode("P1557"))
+        assertEquals(17544, DtcDecoder.vagCode("P1136"))
+        assertEquals(17978, DtcDecoder.vagCode("P1570"))
+        assertNull(DtcDecoder.vagCode("P2002"))
+        assertNull(DtcDecoder.vagCode("U0100"))
+    }
+
+    @Test
+    fun canSingleFrame() {
+        val msgs = ResponseParser.parse(listOf("7E8 06 41 00 BE 3F A8 13"), ObdProtocol.CAN_11_500)
+        assertEquals(1, msgs.size)
+        assertEquals("Двигатель (7E8)", msgs[0].ecu)
+        assertEquals(listOf(0x41, 0x00, 0xBE, 0x3F, 0xA8, 0x13), msgs[0].data.toList())
+    }
+
+    @Test
+    fun canMultiFrameVin() {
+        val lines = listOf(
+            "7E8 10 14 49 02 01 57 56 57",
+            "7E8 21 5A 5A 5A 36 52 5A 37",
+            "7E8 22 35 30 37 38 37 39 31",
+        )
+        val msgs = ResponseParser.parse(lines, ObdProtocol.CAN_11_500)
+        assertEquals(1, msgs.size)
+        val d = msgs[0].data
+        assertEquals(0x14, d.size)
+        val vin = d.drop(3).map { it.toChar() }.joinToString("")
+        assertEquals("WVWZZZ6RZ75078791", vin)
+    }
+
+    @Test
+    fun canDtcsWithCountAndTwoEcus() {
+        val lines = listOf("7E8 06 43 02 01 01 15 57", "7E9 02 43 00")
+        val msgs = ResponseParser.parse(lines, ObdProtocol.CAN_11_500)
+        val dtcs = DtcDecoder.parse(msgs, DtcKind.STORED)
+        assertEquals(listOf("P0101", "P1557"), dtcs.map { it.code })
+    }
+
+    @Test
+    fun can29bit() {
+        val msgs = ResponseParser.parse(listOf("18 DA F1 10 03 41 0D 3C"), ObdProtocol.CAN_29_500)
+        assertEquals(1, msgs.size)
+        assertEquals(listOf(0x41, 0x0D, 0x3C), msgs[0].data.toList())
+        assertTrue(msgs[0].ecu.startsWith("Двигатель"))
+    }
+
+    @Test
+    fun kLineDtcsMultiLine() {
+        val lines = listOf(
+            "48 6B 10 43 04 01 15 57 02 34 00",
+            "48 6B 10 43 03 80 00 00 00 00 00",
+        )
+        val msgs = ResponseParser.parse(lines, ObdProtocol.ISO_9141)
+        val dtcs = DtcDecoder.parse(msgs, DtcKind.STORED)
+        assertEquals(listOf("P0401", "P1557", "P0234", "P0380"), dtcs.map { it.code })
+        assertEquals("Двигатель (10)", dtcs[0].ecu)
+    }
+
+    @Test
+    fun kLineNoSpaces() {
+        val msgs = ResponseParser.parse(listOf("486B10410C1AF8C4"), ObdProtocol.KWP_FAST)
+        assertEquals(listOf(0x41, 0x0C, 0x1A, 0xF8), msgs[0].data.toList())
+        val rpm = Pids.byId[0x0C]!!.decode(intArrayOf(0x1A, 0xF8))
+        assertEquals(1726.0, rpm, 0.01)
+    }
+
+    @Test
+    fun readinessDiesel() {
+        val r = Readiness.decode(intArrayOf(0x82, 0x0F, 0x89, 0x80))!!
+        assertTrue(r.milOn)
+        assertEquals(2, r.dtcCount)
+        assertTrue(r.diesel)
+        val egr = r.monitors.first { it.name.startsWith("Рециркуляция") }
+        assertEquals(MonitorState.INCOMPLETE, egr.state)
+        assertEquals(MonitorState.COMPLETE, r.monitors.first { it.name == "Давление наддува" }.state)
+    }
+
+    @Test
+    fun protocolFromDpn() {
+        assertEquals(ObdProtocol.KWP_FAST, ObdProtocol.fromDpn("A5"))
+        assertEquals(ObdProtocol.CAN_11_500, ObdProtocol.fromDpn("6"))
+        assertEquals(ObdProtocol.ISO_9141, ObdProtocol.fromDpn("A3"))
+    }
+
+    @Test
+    fun cleanLinesStripsEchoAndSearching() {
+        val lines = Elm327.cleanLines("0100", "0100\rSEARCHING...\rBUS INIT: ...OK\r48 6B 10 41 00 BE 3F A8 13 B9\r\r")
+        assertEquals(listOf("48 6B 10 41 00 BE 3F A8 13 B9"), lines)
+    }
+
+    /** Полный сценарий на эмуляторе: подключение, ошибки, стоп-кадр, VIN, стирание. */
+    @Test
+    fun demoEndToEnd() = runBlocking {
+        val t = DemoTransport()
+        t.open()
+        val elm = Elm327(t) {}
+        elm.initialize {}
+        assertEquals(ObdProtocol.KWP_FAST, elm.protocol)
+        val obd = ObdService(elm)
+
+        val pids = obd.supportedPids(1)
+        assertTrue(0x0C in pids && 0x10 in pids && 0x49 in pids)
+
+        val report = obd.readDtcs()
+        assertEquals(listOf("P0401", "P1557"), report.stored.map { it.code })
+        assertEquals(listOf("P0234"), report.pending.map { it.code })
+        assertTrue(report.readiness!!.diesel)
+        val ff = report.freezeFrame!!
+        assertEquals("P0401", ff.dtc)
+        assertEquals(3750.0, ff.values.first { it.first.pid == 0x0C }.second, 0.01)
+
+        val info = obd.vehicleInfo()
+        assertEquals("TMBPY16Y123456789", info.vin)
+        assertEquals("EOBD (Европа)", info.obdStandard)
+
+        obd.clearDtcs()
+        val after = obd.readDtcs()
+        assertTrue(after.all.isEmpty())
+    }
+}
