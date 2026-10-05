@@ -74,7 +74,8 @@ class ObdService(val elm: Elm327) {
         return m.data.copyOfRange(2, 2 + bytes)
     }
 
-    suspend fun readPid(def: PidDef): Double? = readPidRaw(def.pid, def.bytes)?.let(def.decode)
+    suspend fun readPid(def: PidDef): Double? =
+        readPidRaw(def.pid, def.bytes)?.let(def.decode)?.takeIf { !it.isNaN() }
 
     suspend fun readiness(): Readiness? = readPidRaw(0x01, 4)?.let { Readiness.decode(it) }
 
@@ -133,7 +134,8 @@ class ObdService(val elm: Elm327) {
             if (def.pid !in supported) continue
             val (_, msgs) = query("02%02X00".format(def.pid))
             val m = msgs.forService(2).firstOrNull { it.data.size >= 3 + def.bytes && it.data[1] == def.pid } ?: continue
-            values += def to def.decode(m.data.copyOfRange(3, 3 + def.bytes))
+            val v = def.decode(m.data.copyOfRange(3, 3 + def.bytes))
+            if (!v.isNaN()) values += def to v
         }
         if (dtc == null && values.isEmpty()) return null
         return FreezeFrame(dtc, values)

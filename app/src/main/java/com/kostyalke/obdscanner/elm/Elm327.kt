@@ -139,7 +139,8 @@ class Elm327(
         val order = buildList {
             preferred?.takeIf { it != '0' }?.let { add(it) }
             add('0')
-            addAll(listOf('5', '4', '3', '6', '8', '7', '9'))
+            // Машины с ~2008 года почти все на CAN — его пробуем первым, потом K-line.
+            addAll(listOf('6', '5', '4', '3', '8', '7', '9'))
         }.distinct()
         val tried = ArrayList<String>()
         for (code in order) {

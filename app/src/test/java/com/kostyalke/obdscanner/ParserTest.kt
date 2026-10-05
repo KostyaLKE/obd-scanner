@@ -124,7 +124,7 @@ class ParserTest {
     /** Полный сценарий на эмуляторе: подключение, ошибки, стоп-кадр, VIN, стирание. */
     @Test
     fun demoEndToEnd() = runBlocking {
-        val t = DemoTransport()
+        val t = DemoTransport(kLine = true)
         t.open()
         val elm = Elm327(t) {}
         elm.initialize(null) {}
@@ -194,5 +194,41 @@ class ParserTest {
         assertEquals(9, r.versionCode)
         assertEquals("abcdef", r.sha256)
         assertEquals("Автообновление", r.notes)
+    }
+
+    /** Fabia II 2012, 1.6 TDI CR на CAN: ISO-TP, VIN в несколько кадров, сажевый фильтр. */
+    @Test
+    fun demoCanCommonRail() = runBlocking {
+        val t = DemoTransport()
+        t.open()
+        val elm = Elm327(t) {}
+        elm.initialize(null) {}
+        assertEquals(ObdProtocol.CAN_11_500, elm.protocol)
+        val obd = ObdService(elm)
+
+        val pids = obd.supportedPids(1)
+        assertTrue(0x23 in pids && 0x7A in pids && 0x7C in pids && 0x62 in pids)
+
+        val report = obd.readDtcs()
+        assertEquals(listOf("P0401", "P2463"), report.stored.map { it.code })
+        assertEquals(listOf("P0299"), report.pending.map { it.code })
+        assertTrue(report.permanent.isEmpty())
+        assertTrue(report.stored.all { it.ecu == "Двигатель (7E8)" })
+
+        val dpf = obd.readPid(Pids.byId[0x7A]!!)!!
+        assertTrue(dpf in 5.0..16.0)
+        val rail = obd.readPid(Pids.byId[0x23]!!)!!
+        assertTrue(rail in 250.0..1200.0)
+
+        val info = obd.vehicleInfo()
+        assertEquals("TMBEG25J5C3057412", info.vin)
+        assertEquals("ECM-EngineControl", info.ecuName)
+    }
+
+    @Test
+    fun dpfPidWithoutSensorIsNaN() {
+        val v = Pids.byId[0x7A]!!.decode(intArrayOf(0x00, 0x01, 0x00))
+        assertTrue(v.isNaN())
+        assertEquals(12.5, Pids.byId[0x7A]!!.decode(intArrayOf(0x01, 0x04, 0xE2)), 0.001)
     }
 }
