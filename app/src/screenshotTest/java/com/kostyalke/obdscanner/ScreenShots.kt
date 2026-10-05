@@ -169,4 +169,27 @@ class ScreenShots {
             }
         }
     })
+
+    @Test fun vagSection() = listOf(true, false).forEach { dark ->
+        val V = com.kostyalke.obdscanner.vag.VagModules
+        fun m(a: Int) = V.scanList.first { it.address == a }
+        val results = listOf(
+            com.kostyalke.obdscanner.vag.VagModuleResult(m(0x01), "03P906021AB · EDC17C64",
+                listOf(com.kostyalke.obdscanner.vag.VagDtc(16785, 0x23)), true),
+            com.kostyalke.obdscanner.vag.VagModuleResult(m(0x03), "6R0907379AL · ESP MK60EC1",
+                listOf(com.kostyalke.obdscanner.vag.VagDtc(283, 0x23)), true),
+            com.kostyalke.obdscanner.vag.VagModuleResult(m(0x15), "6R0959655C · Airbag", emptyList(), true),
+            com.kostyalke.obdscanner.vag.VagModuleResult(m(0x17), "5J0920810C · KOMBI", emptyList(), true),
+            com.kostyalke.obdscanner.vag.VagModuleResult(m(0x02), null, emptyList(), false),
+            com.kostyalke.obdscanner.vag.VagModuleResult(m(0x08), null, emptyList(), false),
+        )
+        shot("12_vag", dark, @Composable {
+            androidx.compose.foundation.lazy.LazyColumn(contentPadding = ScreenPadding) {
+                item {
+                    VagSection(VagState(results = results, time = 1_759_603_440_000), true,
+                        { vagDtcText(it, db) }, {}, {})
+                }
+            }
+        })
+    }
 }

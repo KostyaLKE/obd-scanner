@@ -81,7 +81,19 @@ class Elm327(
     var protocol: ObdProtocol = ObdProtocol.AUTO
         private set
 
-    suspend fun send(command: String, timeoutMs: Long = 5000): ElmReply = mutex.withLock {
+    /** Держит адаптер на время многошаговой операции (сессия VAG меняет настройки ELM). */
+    private val sessionLock = Mutex()
+
+    suspend fun send(command: String, timeoutMs: Long = 5000): ElmReply = sessionLock.withLock { sendRaw(command, timeoutMs) }
+
+    /**
+     * Эксклюзивная сессия: пока выполняется [block], обычные запросы (датчики, OBD) ждут.
+     * Внутри команды отправляются через переданную функцию.
+     */
+    suspend fun <T> exclusive(block: suspend (send: suspend (String, Long) -> ElmReply) -> T): T =
+        sessionLock.withLock { block { cmd, timeout -> sendRaw(cmd, timeout) } }
+
+    private suspend fun sendRaw(command: String, timeoutMs: Long): ElmReply = mutex.withLock {
         transport.clearInput()
         onLog(LogLine(System.currentTimeMillis(), true, command))
         transport.write(command + "\r")

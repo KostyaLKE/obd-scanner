@@ -22,6 +22,12 @@ import com.kostyalke.obdscanner.obd.PidDef
 import com.kostyalke.obdscanner.obd.Pids
 import com.kostyalke.obdscanner.obd.Readiness
 import com.kostyalke.obdscanner.obd.VehicleInfo
+import com.kostyalke.obdscanner.elm.ObdProtocol
+import com.kostyalke.obdscanner.vag.Tp20
+import com.kostyalke.obdscanner.vag.VagException
+import com.kostyalke.obdscanner.vag.VagModule
+import com.kostyalke.obdscanner.vag.VagModuleResult
+import com.kostyalke.obdscanner.vag.VagModules
 import com.kostyalke.obdscanner.update.ReleaseInfo
 import com.kostyalke.obdscanner.update.Updater
 import java.io.File
@@ -80,6 +86,17 @@ data class LiveState(
     val onlyFavorites: Boolean = false,
     val cycleMs: Long = 0,
     val loading: Boolean = false,
+)
+
+/** Опрос всех блоков VAG (TP2.0). */
+data class VagState(
+    val scanning: Boolean = false,
+    val current: String? = null,
+    val progress: Float = 0f,
+    val results: List<VagModuleResult> = emptyList(),
+    val time: Long? = null,
+    val error: String? = null,
+    val clearing: Int? = null,
 )
 
 data class DtcState(
@@ -356,6 +373,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                         _vehicle.value = null
                         _readiness.value = null
                         _dtc.value = DtcState()
+                        _vag.value = VagState()
                         runCatching { loadSupported() }
                         _live.update { it.copy(loading = false) }
                         if (liveWanted) launchLive()
@@ -454,6 +472,85 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    // ---------- Все блоки VAG ----------
+
+    private val _vag = MutableStateFlow(VagState())
+    val vag: StateFlow<VagState> = _vag.asStateFlow()
+
+    /** TP2.0 работает только на CAN 11 бит / 500 кбит/с (VAG примерно с 2008 года). */
+    fun vagSupported(): Boolean = service?.elm?.protocol == ObdProtocol.CAN_11_500
+
+    fun scanVag() {
+        if (_vag.value.scanning || !vagSupported()) return
+        stopLive()
+        viewModelScope.launch {
+            _vag.value = VagState(scanning = true)
+            try {
+                withService { s ->
+                    s.elm.exclusive { send ->
+                        val tp = Tp20(send)
+                        try {
+                            tp.enterRawMode()
+                            val list = VagModules.scanList
+                            list.forEachIndexed { i, m ->
+                                _vag.update { it.copy(current = m.title, progress = i.toFloat() / list.size) }
+                                val r = Tp20.scanModule(tp, m)
+                                _vag.update { it.copy(results = it.results + r) }
+                            }
+                        } finally {
+                            tp.restore()
+                        }
+                    }
+                }
+                _vag.update { it.copy(time = System.currentTimeMillis()) }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: VagException) {
+                _vag.update { it.copy(error = e.message) }
+            } catch (e: Exception) {
+                _vag.update { it.copy(error = humanError(e)) }
+            } finally {
+                _vag.update { it.copy(scanning = false, current = null, progress = 1f) }
+            }
+        }
+    }
+
+    fun clearVag(m: VagModule) {
+        if (_vag.value.scanning || _vag.value.clearing != null) return
+        viewModelScope.launch {
+            _vag.update { it.copy(clearing = m.address, error = null) }
+            try {
+                val fresh = withService { s ->
+                    s.elm.exclusive { send ->
+                        val tp = Tp20(send)
+                        try {
+                            tp.enterRawMode()
+                            if (!tp.open(m)) throw VagException("Блок «${m.title}» не ответил")
+                            try {
+                                tp.startSession()
+                                tp.clearDtcs()
+                            } finally {
+                                tp.close()
+                            }
+                            Tp20.scanModule(tp, m)
+                        } finally {
+                            tp.restore()
+                        }
+                    }
+                }
+                if (fresh != null) _vag.update { st ->
+                    st.copy(results = st.results.map { if (it.module.address == m.address) fresh else it })
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _vag.update { it.copy(error = "Не удалось сбросить: ${e.message ?: e.javaClass.simpleName}") }
+            } finally {
+                _vag.update { it.copy(clearing = null) }
+            }
+        }
+    }
+
     // ---------- Ошибки ----------
 
     fun readDtcs() {
@@ -500,7 +597,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     fun buildReportText(): String? {
         val r = _dtc.value.report ?: return null
-        return ReportFormatter.format(r, _vehicle.value, (_conn.value as? ConnState.Connected), db)
+        return ReportFormatter.format(r, _vehicle.value, (_conn.value as? ConnState.Connected), db, _vag.value.results)
     }
 
     /** Каждое чтение ошибок попадает в историю — форумчане жалуются, что «забыл сохранить». */

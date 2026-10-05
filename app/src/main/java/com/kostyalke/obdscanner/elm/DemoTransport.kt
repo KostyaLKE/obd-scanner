@@ -81,7 +81,76 @@ class DemoTransport(
 
     private fun u16(v: Int) = intArrayOf((v shr 8) and 0xFF, v and 0xFF)
 
+    // ---------- Эмуляция блоков VAG по TP2.0 (только CAN-демо) ----------
+
+    private var caf = true
+    private var header = 0x7DF
+    private class DemoEcu(val part: String, val dtcs: MutableList<Pair<Int, Int>>)
+    private val ecus = mapOf(
+        0x01 to DemoEcu("03P906021AB  EDC17C64", mutableListOf(16785 to 0x23)), // = P0401
+        0x03 to DemoEcu("6R0907379AL  ESP MK60EC1", mutableListOf(283 to 0x23)),
+        0x09 to DemoEcu("6R0937087K  BCM PQ25", mutableListOf()),
+        0x15 to DemoEcu("6R0959655C  Airbag", mutableListOf()),
+        0x17 to DemoEcu("5J0920810C   KOMBI", mutableListOf(668 to 0x25)),
+        0x19 to DemoEcu("6R0907530   Gateway", mutableListOf()),
+    )
+    private var ecu: DemoEcu? = null
+    private var ecuSeq = 0
+
+    private fun hexLine(id: Int, vararg b: Int) = "%03X ".format(id) + b.joinToString(" ") { "%02X".format(it) }
+
+    private fun tp20(b: List<Int>): List<String> {
+        if (header == 0x200) {
+            if (b.size >= 7 && b[1] == 0xC0) {
+                val e = ecus[b[0]] ?: return listOf("NO DATA")
+                ecu = e
+                ecuSeq = 0
+                return listOf(hexLine(0x200 + b[0], 0x00, 0xD0, 0x00, 0x03, 0x40, 0x07, 0x01))
+            }
+            return listOf("NO DATA")
+        }
+        val e = ecu ?: return listOf("NO DATA")
+        if (b.isEmpty()) return listOf("?")
+        return when (b[0] shr 4) {
+            0xA -> when (b[0]) {
+                0xA0, 0xA3 -> listOf(hexLine(0x300, 0xA1, 0x0F, 0x8A, 0xFF, 0x4A, 0xFF))
+                0xA8 -> { ecu = null; listOf(hexLine(0x300, 0xA8)) }
+                else -> listOf("NO DATA")
+            }
+            0xB -> listOf("NO DATA")
+            0x1, 0x3 -> {
+                val ack = hexLine(0x300, 0xB0 or ((b[0] + 1) and 0x0F))
+                val len = (b[1] shl 8) or b[2]
+                val kwp = b.drop(3).take(len)
+                val resp: List<Int> = when {
+                    kwp == listOf(0x10, 0x89) -> listOf(0x50, 0x89)
+                    kwp == listOf(0x1A, 0x9B) -> listOf(0x5A, 0x9B) + e.part.map { it.code }
+                    kwp == listOf(0x18, 0x02, 0xFF, 0x00) ->
+                        listOf(0x58, e.dtcs.size) + e.dtcs.flatMap { (c, st) -> listOf(c shr 8, c and 0xFF, st) }
+                    kwp == listOf(0x14, 0xFF, 0x00) -> { e.dtcs.clear(); listOf(0x54, 0xFF, 0x00) }
+                    else -> listOf(0x7F, kwp.firstOrNull() ?: 0, 0x11)
+                }
+                val data = listOf(resp.size shr 8, resp.size and 0xFF) + resp
+                val chunks = data.chunked(7)
+                listOf(ack) + chunks.mapIndexed { i, c ->
+                    val type = if (i == chunks.lastIndex) 0x10 else 0x20
+                    hexLine(0x300, type or (ecuSeq++ and 0x0F), *c.toIntArray())
+                }
+            }
+            else -> listOf("NO DATA")
+        }
+    }
+
     private fun respond(cmd: String): List<String> {
+        if (!kLine) {
+            when {
+                cmd == "ATCAF0" -> { caf = false; return listOf("OK") }
+                cmd == "ATCAF1" -> { caf = true; return listOf("OK") }
+                cmd.startsWith("ATSH") -> { header = cmd.drop(4).toIntOrNull(16) ?: header; return listOf("OK") }
+                cmd.startsWith("ATCRA") || cmd.startsWith("ATST") || cmd.startsWith("ATR") -> return listOf("OK")
+                !caf && !cmd.startsWith("AT") -> return tp20(cmd.chunked(2).mapNotNull { it.toIntOrNull(16) })
+            }
+        }
         if (cmd == "ATKW0") kw0 = true
         if (cmd.startsWith("ATSP") && cmd.length == 5) proto = cmd[4]
         if (strictKeyword && !cmd.startsWith("AT") && !(kw0 && proto == '5')) {

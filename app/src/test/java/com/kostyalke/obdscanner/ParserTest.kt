@@ -231,4 +231,57 @@ class ParserTest {
         assertTrue(v.isNaN())
         assertEquals(12.5, Pids.byId[0x7A]!!.decode(intArrayOf(0x01, 0x04, 0xE2)), 0.001)
     }
+
+    /** Опрос блоков VAG по TP2.0 на эмуляторе: открытие канала, сессия, номер детали, ошибки, сброс. */
+    @Test
+    fun vagTp20Scan() = runBlocking {
+        val t = DemoTransport()
+        t.open()
+        val elm = Elm327(t) {}
+        elm.initialize(null) {}
+        val results = elm.exclusive { send ->
+            val tp = com.kostyalke.obdscanner.vag.Tp20(send)
+            tp.enterRawMode()
+            try {
+                com.kostyalke.obdscanner.vag.VagModules.scanList.map { com.kostyalke.obdscanner.vag.Tp20.scanModule(tp, it) }
+            } finally {
+                tp.restore()
+            }
+        }
+        val byAddr = results.associateBy { it.module.address }
+        assertEquals(listOf(16785), byAddr[0x01]!!.dtcs.map { it.code })
+        assertEquals("P0401", com.kostyalke.obdscanner.vag.VagModules.toObdCode(16785))
+        assertEquals(listOf(283), byAddr[0x03]!!.dtcs.map { it.code })
+        assertEquals("6R0907379AL · ESP MK60EC1", byAddr[0x03]!!.partNumber)
+        assertTrue(byAddr[0x15]!!.responded && byAddr[0x15]!!.dtcs.isEmpty())
+        assertTrue(!byAddr[0x02]!!.responded)
+        assertTrue(results.all { it.error == null })
+
+        // Сброс ошибок ABS
+        elm.exclusive { send ->
+            val tp = com.kostyalke.obdscanner.vag.Tp20(send)
+            tp.enterRawMode()
+            try {
+                val abs = com.kostyalke.obdscanner.vag.VagModules.scanList.first { it.address == 0x03 }
+                assertTrue(tp.open(abs))
+                tp.startSession()
+                tp.clearDtcs()
+                tp.close()
+                assertTrue(com.kostyalke.obdscanner.vag.Tp20.scanModule(tp, abs).dtcs.isEmpty())
+            } finally {
+                tp.restore()
+            }
+        }
+        // После сессии VAG обычный OBD снова работает
+        val obd = ObdService(elm)
+        assertEquals(listOf("P0401", "P2463"), obd.readDtcs().stored.map { it.code })
+    }
+
+    @Test
+    fun vagCodeConversion() {
+        assertEquals("P0401", com.kostyalke.obdscanner.vag.VagModules.toObdCode(16785))
+        assertEquals("P1557", com.kostyalke.obdscanner.vag.VagModules.toObdCode(17965))
+        assertEquals(null, com.kostyalke.obdscanner.vag.VagModules.toObdCode(283))
+        assertEquals("00283", com.kostyalke.obdscanner.vag.VagModules.format(283))
+    }
 }

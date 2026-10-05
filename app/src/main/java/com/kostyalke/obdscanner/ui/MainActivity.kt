@@ -103,6 +103,7 @@ private fun App(vm: AppViewModel) {
     var overlay by rememberSaveable { mutableStateOf(Overlay.NONE) }
     val connected = conn as? ConnState.Connected
     val update by vm.update.collectAsStateWithLifecycle()
+    val vag by vm.vag.collectAsStateWithLifecycle()
     var autoUpdate by remember { mutableStateOf(vm.autoUpdate) }
 
     BackHandler(enabled = overlay != Overlay.NONE) { overlay = Overlay.NONE }
@@ -167,6 +168,11 @@ private fun App(vm: AppViewModel) {
                     info = vm.db::info,
                     onRead = vm::readDtcs,
                     onClear = vm::clearDtcs,
+                    vag = vag,
+                    vagSupported = vm.vagSupported(),
+                    vagDtcText = { vagDtcText(it, vm.db) },
+                    onVagScan = vm::scanVag,
+                    onVagClear = vm::clearVag,
                     onSearch = { q ->
                         val url = "https://www.google.com/search?q=" + java.net.URLEncoder.encode(q, "UTF-8")
                         runCatching { ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
