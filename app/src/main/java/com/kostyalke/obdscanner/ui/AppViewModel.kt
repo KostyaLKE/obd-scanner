@@ -97,6 +97,10 @@ data class VagState(
     val time: Long? = null,
     val error: String? = null,
     val clearing: Int? = null,
+    val backingUp: Boolean = false,
+    /** Текст последней сохранённой копии (JSON) — для «Поделиться». */
+    val backupJson: String? = null,
+    val backupInfo: String? = null,
 )
 
 data class DtcState(
@@ -511,6 +515,54 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 _vag.update { it.copy(error = humanError(e)) }
             } finally {
                 _vag.update { it.copy(scanning = false, current = null, progress = 1f) }
+            }
+        }
+    }
+
+    private val backups by lazy { com.kostyalke.obdscanner.data.BackupStore(getApplication()) }
+
+    /**
+     * Резервная копия служебных данных всех ответивших блоков (только чтение).
+     * Нужна до любого кодирования: из неё можно вернуть всё как было.
+     */
+    fun backupVag() {
+        val st = _vag.value
+        if (st.scanning || st.backingUp || !vagSupported()) return
+        val targets = st.results.filter { it.responded }.map { it.module }.ifEmpty { VagModules.scanList }
+        viewModelScope.launch {
+            _vag.update { it.copy(backingUp = true, error = null, backupInfo = null) }
+            try {
+                val list = withService { s ->
+                    s.elm.exclusive { send ->
+                        val tp = Tp20(send)
+                        try {
+                            tp.enterRawMode()
+                            targets.mapNotNull { m ->
+                                _vag.update { it.copy(current = m.title) }
+                                runCatching { Tp20.backupModule(tp, m) }.getOrNull()
+                            }
+                        } finally {
+                            tp.restore()
+                        }
+                    }
+                } ?: return@launch
+                if (list.isEmpty()) throw VagException("Ни один блок не отдал данные")
+                val time = System.currentTimeMillis()
+                val vin = _vehicle.value?.vin
+                val file = backups.save(list, vin, time)
+                _vag.update {
+                    it.copy(
+                        backupJson = file.readText(),
+                        backupInfo = "Копия сохранена: ${list.size} ${plural(list.size, "блок", "блока", "блоков")}, " +
+                            "${list.sumOf { b -> b.records.size }} записей",
+                    )
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _vag.update { it.copy(error = "Копия не сохранена: ${e.message ?: e.javaClass.simpleName}") }
+            } finally {
+                _vag.update { it.copy(backingUp = false, current = null) }
             }
         }
     }

@@ -173,6 +173,8 @@ private fun App(vm: AppViewModel) {
                     vagDtcText = { vagDtcText(it, vm.db) },
                     onVagScan = vm::scanVag,
                     onVagClear = vm::clearVag,
+                    onVagBackup = vm::backupVag,
+                    onShareBackup = { ctx.shareText("Резервная копия блоков", it) },
                     onSearch = { q ->
                         val url = "https://www.google.com/search?q=" + java.net.URLEncoder.encode(q, "UTF-8")
                         runCatching { ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }

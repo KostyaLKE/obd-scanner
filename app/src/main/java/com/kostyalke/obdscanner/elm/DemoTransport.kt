@@ -128,6 +128,8 @@ class DemoTransport(
                     kwp == listOf(0x18, 0x02, 0xFF, 0x00) ->
                         listOf(0x58, e.dtcs.size) + e.dtcs.flatMap { (c, st) -> listOf(c shr 8, c and 0xFF, st) }
                     kwp == listOf(0x14, 0xFF, 0x00) -> { e.dtcs.clear(); listOf(0x54, 0xFF, 0x00) }
+                    kwp == listOf(0x1A, 0x9A) -> listOf(0x5A, 0x9A, 0x01, 0x0A, 0x24, 0x03, 0x00, 0x12, 0x34)
+                    kwp == listOf(0x1A, 0x91) -> listOf(0x5A, 0x91, 0x0F) + "SW 0102".map { it.code }
                     else -> listOf(0x7F, kwp.firstOrNull() ?: 0, 0x11)
                 }
                 val data = listOf(resp.size shr 8, resp.size and 0xFF) + resp

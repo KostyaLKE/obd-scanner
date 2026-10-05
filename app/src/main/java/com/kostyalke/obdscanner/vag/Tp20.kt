@@ -7,6 +7,9 @@ class VagException(message: String) : Exception(message)
 
 data class VagDtc(val code: Int, val status: Int)
 
+/** Сырые идентификационные записи блока (1A xx) — основа резервной копии кодировки. */
+data class ModuleBackup(val module: VagModule, val records: Map<Int, IntArray>)
+
 data class VagModuleResult(
     val module: VagModule,
     /** null — блок не ответил (его нет в машине или он спит). */
@@ -153,7 +156,34 @@ class Tp20(private val send: suspend (String, Long) -> ElmReply) {
         if (r.firstOrNull() != 0x54) throw VagException("Блок не подтвердил сброс")
     }
 
+    /** Читает запись идентификации (только чтение). null — блок её не поддерживает. */
+    suspend fun readIdent(id: Int): IntArray? = try {
+        val r = request(0x1A, id)
+        if (r.size >= 2 && r[0] == 0x5A && r[1] == id) r.copyOfRange(2, r.size) else null
+    } catch (e: VagException) {
+        null
+    }
+
     companion object {
+        /**
+         * Записи, где VAG хранит номер детали, версию ПО, кодировку и код мастерской.
+         * Формат зависит от блока, поэтому сохраняем их как есть и разбираем по копии с машины.
+         */
+        val BACKUP_IDS = listOf(0x9B, 0x9A, 0x91, 0x86, 0x9C)
+
+        /** Резервная копия одного блока. null — блок не ответил. */
+        suspend fun backupModule(tp: Tp20, m: VagModule): ModuleBackup? {
+            if (!tp.open(m)) return null
+            return try {
+                tp.startSession()
+                val recs = LinkedHashMap<Int, IntArray>()
+                for (id in BACKUP_IDS) tp.readIdent(id)?.let { recs[id] = it }
+                ModuleBackup(m, recs)
+            } finally {
+                tp.close()
+            }
+        }
+
         /** Опрос одного блока: канал → сессия → номер детали → ошибки → закрытие. */
         suspend fun scanModule(tp: Tp20, m: VagModule): VagModuleResult {
             val opened = try {

@@ -284,4 +284,31 @@ class ParserTest {
         assertEquals(null, com.kostyalke.obdscanner.vag.VagModules.toObdCode(283))
         assertEquals("00283", com.kostyalke.obdscanner.vag.VagModules.format(283))
     }
+
+    /** Резервная копия: только чтение записей 1A xx, неподдерживаемые записи пропускаются. */
+    @Test
+    fun vagBackup() = runBlocking {
+        val t = DemoTransport()
+        t.open()
+        val elm = Elm327(t) {}
+        elm.initialize(null) {}
+        val V = com.kostyalke.obdscanner.vag.VagModules
+        val backups = elm.exclusive { send ->
+            val tp = com.kostyalke.obdscanner.vag.Tp20(send)
+            tp.enterRawMode()
+            try {
+                V.scanList.mapNotNull { com.kostyalke.obdscanner.vag.Tp20.backupModule(tp, it) }
+            } finally {
+                tp.restore()
+            }
+        }
+        assertEquals(6, backups.size)
+        val bcm = backups.first { it.module.address == 0x09 }
+        assertEquals(setOf(0x9B, 0x9A, 0x91), bcm.records.keys)
+        assertEquals("01 0A 24 03 00 12 34", com.kostyalke.obdscanner.data.BackupStore.hex(bcm.records[0x9A]!!))
+        val json = com.kostyalke.obdscanner.data.BackupStore.toJson(backups, "TMBEG25J5C3057412", 0L)
+        assertEquals(6, json.getJSONArray("modules").length())
+        // После копии обычная диагностика работает
+        assertEquals(listOf("P0401", "P2463"), ObdService(elm).readDtcs().stored.map { it.code })
+    }
 }

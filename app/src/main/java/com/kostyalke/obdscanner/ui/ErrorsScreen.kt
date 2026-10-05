@@ -69,6 +69,8 @@ fun ErrorsContent(
     vagDtcText: (Int) -> String = { "%05d".format(it) },
     onVagScan: () -> Unit = {},
     onVagClear: (com.kostyalke.obdscanner.vag.VagModule) -> Unit = {},
+    onVagBackup: () -> Unit = {},
+    onShareBackup: (String) -> Unit = {},
 ) {
     var confirmClear by remember { mutableStateOf(false) }
     val report = st.report
@@ -108,7 +110,7 @@ fun ErrorsContent(
                         item { Panel { Column(Modifier.padding(16.dp)) { FreezeFrameTable(ff) } } }
                     }
                 }
-                item(key = "vag") { VagSection(vag, vagSupported, vagDtcText, onVagScan, onVagClear) }
+                item(key = "vag") { VagSection(vag, vagSupported, vagDtcText, onVagScan, onVagClear, onVagBackup, onShareBackup) }
                 if (report.notes.isNotEmpty()) {
                     item {
                         Row(Modifier.padding(top = 12.dp, start = 4.dp, end = 4.dp)) {

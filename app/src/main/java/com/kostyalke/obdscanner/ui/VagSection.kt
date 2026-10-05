@@ -16,7 +16,10 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material3.AlertDialog
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -45,6 +48,7 @@ import java.util.Locale
  * Раздел «Все блоки»: опрос ABS, подушек, приборки и т.д. по протоколу VAG.
  * Кнопка опроса живёт внутри раздела — она относится только к нему.
  */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun VagSection(
     st: VagState,
@@ -52,6 +56,8 @@ fun VagSection(
     dtcText: (Int) -> String,
     onScan: () -> Unit,
     onClear: (VagModule) -> Unit,
+    onBackup: () -> Unit = {},
+    onShareBackup: (String) -> Unit = {},
 ) {
     var confirm by remember { mutableStateOf<VagModule?>(null) }
     Column {
@@ -91,12 +97,29 @@ fun VagSection(
                     modifier = Modifier.padding(16.dp),
                 )
             }
-            if (!st.scanning) {
-                Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, bottom = 14.dp,
-                    top = if (st.results.isEmpty()) 0.dp else 8.dp)) {
+            if (st.backingUp) {
+                Column(Modifier.padding(16.dp)) {
+                    Text("Сохраняю копию: ${st.current ?: "…"}", style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface)
+                    Spacer(Modifier.size(8.dp))
+                    LinearProgressIndicator(Modifier.fillMaxWidth())
+                }
+            } else if (!st.scanning) {
+                FlowRow(
+                    Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, bottom = 14.dp,
+                        top = if (st.results.isEmpty()) 0.dp else 8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
                     FilledTonalButton(onClick = onScan, contentPadding = ButtonPadding,
                         modifier = Modifier.heightIn(min = 44.dp)) {
                         Text(if (st.results.isEmpty()) "Проверить все блоки" else "Проверить снова")
+                    }
+                    if (st.results.any { it.responded }) {
+                        OutlinedButton(onClick = onBackup, contentPadding = ButtonPadding,
+                            modifier = Modifier.heightIn(min = 44.dp)) {
+                            Text("Сохранить копию")
+                        }
                     }
                 }
             }
@@ -104,6 +127,22 @@ fun VagSection(
         st.error?.let {
             Spacer(Modifier.size(8.dp))
             StatusNote(it, Status.colors.error, AppIcons.Error, compact = true)
+        }
+        st.backupInfo?.let { info ->
+            Spacer(Modifier.size(8.dp))
+            StatusNote(info, Status.colors.ok, Icons.Filled.CheckCircle,
+                "Отправьте файл разработчику — по нему настроим кодирование под вашу машину.", compact = true)
+            st.backupJson?.let { json ->
+                TextButton(onClick = { onShareBackup(json) }) { Text("Поделиться копией") }
+            }
+        }
+        if (st.results.any { it.responded } && st.backupInfo == null && !st.scanning) {
+            Text(
+                "«Сохранить копию» читает служебные данные блоков (кодировку) — только чтение, ничего не меняет. " +
+                    "Копия нужна, чтобы позже безопасно включать функции и откатывать изменения.",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(start = 4.dp, end = 4.dp, top = 8.dp),
+            )
         }
     }
 
