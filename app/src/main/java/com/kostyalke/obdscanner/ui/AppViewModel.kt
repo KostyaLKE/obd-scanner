@@ -443,6 +443,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun humanError(e: Throwable): String = when (e) {
+        is SecurityException ->
+            "Android не дал приложению доступ к Bluetooth. Откройте Настройки → Приложения → OBD Сканер → " +
+                "Разрешения и разрешите «Устройства поблизости»."
         is ElmTimeoutException -> "Адаптер перестал отвечать."
         is IOException -> e.message ?: "Связь с адаптером потеряна"
         else -> e.message ?: e.javaClass.simpleName

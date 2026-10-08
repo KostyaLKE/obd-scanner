@@ -26,7 +26,12 @@ class BluetoothTransport(
     private var output: OutputStream? = null
 
     override suspend fun open() = withContext(Dispatchers.IO) {
-        adapter.cancelDiscovery()
+        // Остановить поиск устройств (он тормозит соединение). На Android 12+ для этого нужно
+        // отдельное разрешение BLUETOOTH_SCAN, которого у нас нет — тогда просто продолжаем.
+        try {
+            adapter.cancelDiscovery()
+        } catch (_: SecurityException) {
+        }
         var lastError: Exception? = null
         // Китайские клоны капризны: пробуем по очереди три способа подключения.
         val attempts: List<() -> BluetoothSocket> = listOf(
