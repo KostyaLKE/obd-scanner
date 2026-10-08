@@ -53,11 +53,12 @@ import java.util.Locale
 fun VagSection(
     st: VagState,
     supported: Boolean,
-    dtcText: (Int) -> String,
+    dtcText: (com.kostyalke.obdscanner.vag.VagDtc) -> String,
     onScan: () -> Unit,
     onClear: (VagModule) -> Unit,
     onBackup: () -> Unit = {},
     onShareBackup: (String) -> Unit = {},
+    onShareLog: () -> Unit = {},
 ) {
     var confirm by remember { mutableStateOf<VagModule?>(null) }
     Column {
@@ -127,6 +128,7 @@ fun VagSection(
         st.error?.let {
             Spacer(Modifier.size(8.dp))
             StatusNote(it, Status.colors.error, AppIcons.Error, compact = true)
+            TextButton(onClick = onShareLog) { Text("Отправить журнал") }
         }
         st.backupInfo?.let { info ->
             Spacer(Modifier.size(8.dp))
@@ -163,7 +165,7 @@ fun VagSection(
 }
 
 @Composable
-private fun VagRow(r: VagModuleResult, dtcText: (Int) -> String, clearing: Boolean, onClear: () -> Unit) {
+private fun VagRow(r: VagModuleResult, dtcText: (com.kostyalke.obdscanner.vag.VagDtc) -> String, clearing: Boolean, onClear: () -> Unit) {
     var expanded by rememberSaveable(r.module.address) { mutableStateOf(r.dtcs.isNotEmpty()) }
     val tone = when {
         r.error != null -> Status.colors.warning
@@ -188,7 +190,7 @@ private fun VagRow(r: VagModuleResult, dtcText: (Int) -> String, clearing: Boole
         }
         if (expanded) {
             Column(Modifier.padding(start = 28.dp, top = 6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                r.partNumber?.let {
+                (listOfNotNull(r.partNumber) + r.protocol).joinToString(" · ").let {
                     Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 r.error?.let {
@@ -198,7 +200,7 @@ private fun VagRow(r: VagModuleResult, dtcText: (Int) -> String, clearing: Boole
                     Surface(color = MaterialTheme.colorScheme.surfaceContainerHigh, shape = RoundedCornerShape(12.dp)) {
                         Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                             r.dtcs.forEach { d ->
-                                val text = dtcText(d.code)
+                                val text = dtcText(d)
                                 val code = text.substringBefore(" — ")
                                 Column {
                                     Text(code, style = MaterialTheme.typography.titleSmall, fontFamily = FontFamily.Monospace,

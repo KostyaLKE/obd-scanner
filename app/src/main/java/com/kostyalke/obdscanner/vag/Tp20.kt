@@ -5,7 +5,11 @@ import com.kostyalke.obdscanner.elm.ElmReply
 /** Ошибка протокола VAG. Не IOException: это не обрыв Bluetooth, переподключаться не нужно. */
 class VagException(message: String) : Exception(message)
 
-data class VagDtc(val code: Int, val status: Int)
+/**
+ * Ошибка блока. KWP2000: [code] — 5-значный код VAG (00283).
+ * UDS: [code] — 3 байта (2 байта кода как в OBD + байт типа неисправности), [uds] = true.
+ */
+data class VagDtc(val code: Int, val status: Int, val uds: Boolean = false)
 
 /** Сырые идентификационные записи блока (1A xx) — основа резервной копии кодировки. */
 data class ModuleBackup(val module: VagModule, val records: Map<Int, IntArray>)
@@ -17,6 +21,8 @@ data class VagModuleResult(
     val dtcs: List<VagDtc>,
     val responded: Boolean,
     val error: String? = null,
+    /** Каким протоколом удалось связаться: «KWP2000» (TP2.0) или «UDS». */
+    val protocol: String = "KWP2000",
 )
 
 /**

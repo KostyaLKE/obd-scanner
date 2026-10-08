@@ -36,7 +36,7 @@ class BackupStore(context: Context) {
                     put("address", b.module.addressText)
                     put("title", b.module.title)
                     put("records", JSONObject().apply {
-                        for ((id, data) in b.records) put("%02X".format(id), hex(data))
+                        for ((id, data) in b.records) put(if (id > 0xFF) "%04X".format(id) else "%02X".format(id), hex(data))
                     })
                 })
             })

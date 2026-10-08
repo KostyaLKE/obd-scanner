@@ -175,6 +175,7 @@ private fun App(vm: AppViewModel) {
                     onVagClear = vm::clearVag,
                     onVagBackup = vm::backupVag,
                     onShareBackup = { ctx.shareText("Резервная копия блоков", it) },
+                    onShareLog = { ctx.shareText("Отправить журнал", vm.shareLog()) },
                     onSearch = { q ->
                         val url = "https://www.google.com/search?q=" + java.net.URLEncoder.encode(q, "UTF-8")
                         runCatching { ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }

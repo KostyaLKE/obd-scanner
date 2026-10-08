@@ -50,9 +50,9 @@ class DemoTransport(
     }
 
     /** CAN: сообщение блока 7E8 в кадрах ISO-TP (с заголовками и заполнением до 8 байт, как у ELM327). */
-    private fun canFrames(payload: IntArray): List<String> {
+    private fun canFrames(payload: IntArray, from: Int = 0x7E8): List<String> {
         fun frame(bytes: List<Int>) =
-            "7E8 " + (bytes + List(8 - bytes.size) { 0x00 }).joinToString(" ") { "%02X".format(it) }
+            "%03X ".format(from) + (bytes + List(8 - bytes.size) { 0x00 }).joinToString(" ") { "%02X".format(it) }
         if (payload.size <= 7) return listOf(frame(listOf(payload.size) + payload.toList()))
         val out = ArrayList<String>()
         out += frame(listOf(0x10 or (payload.size shr 8), payload.size and 0xFF) + payload.take(6))
@@ -143,6 +143,23 @@ class DemoTransport(
         }
     }
 
+    // Блок только с UDS (как новые блоки VAG): усилитель руля, запрос 0x712 → ответ 0x77C.
+    private val epsDtcs = mutableListOf(0x454500 to 0x09) // C0545, подтверждена
+
+    private fun udsPowerSteering(b: List<Int>): List<String> {
+        val resp: List<Int> = when {
+            b == listOf(0x19, 0x02, 0xFF) -> listOf(0x59, 0x02, 0xFF) +
+                epsDtcs.flatMap { (c, st) -> listOf(c shr 16, (c shr 8) and 0xFF, c and 0xFF, st) }
+            b == listOf(0x22, 0xF1, 0x87) -> listOf(0x62, 0xF1, 0x87) + "6R0423156B ".map { it.code }
+            b == listOf(0x22, 0xF1, 0x97) -> listOf(0x62, 0xF1, 0x97) + "EPS ZFLS".map { it.code }
+            b == listOf(0x22, 0x06, 0x00) -> listOf(0x62, 0x06, 0x00, 0x01, 0x02, 0x03)
+            b == listOf(0x10, 0x03) -> listOf(0x50, 0x03, 0x00, 0x32, 0x01, 0xF4)
+            b == listOf(0x14, 0xFF, 0xFF, 0xFF) -> { epsDtcs.clear(); listOf(0x54) }
+            else -> listOf(0x7F, b.firstOrNull() ?: 0, 0x31)
+        }
+        return canFrames(resp.toIntArray(), from = 0x77C)
+    }
+
     private fun respond(cmd: String): List<String> {
         if (!kLine) {
             when {
@@ -151,6 +168,7 @@ class DemoTransport(
                 cmd.startsWith("ATSH") -> { header = cmd.drop(4).toIntOrNull(16) ?: header; return listOf("OK") }
                 cmd.startsWith("ATCRA") || cmd.startsWith("ATST") || cmd.startsWith("ATR") -> return listOf("OK")
                 !caf && !cmd.startsWith("AT") -> return tp20(cmd.chunked(2).mapNotNull { it.toIntOrNull(16) })
+                caf && !cmd.startsWith("AT") && header == 0x712 -> return udsPowerSteering(cmd.chunked(2).mapNotNull { it.toIntOrNull(16) })
             }
         }
         if (cmd == "ATKW0") kw0 = true

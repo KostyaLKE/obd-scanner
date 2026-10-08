@@ -55,6 +55,23 @@ object VagModules {
     fun describe(code: Int): String? = known[code]
 
     /**
+     * CAN-адреса UDS (запрос → ответ) для блоков VAG. Используются, если блок молчит на TP2.0:
+     * более новые блоки (например, двигатель EDC17) общаются только по UDS.
+     */
+    val udsIds: Map<Int, Pair<Int, Int>> = mapOf(
+        0x01 to (0x7E0 to 0x7E8),
+        0x02 to (0x7E1 to 0x7E9),
+        0x03 to (0x713 to 0x77D),
+        0x08 to (0x746 to 0x7B0),
+        0x09 to (0x70E to 0x778),
+        0x15 to (0x715 to 0x77F),
+        0x16 to (0x70C to 0x776),
+        0x17 to (0x714 to 0x77E),
+        0x19 to (0x710 to 0x77A),
+        0x44 to (0x712 to 0x77C),
+    )
+
+    /**
      * Коды двигателя VAG 16384–19999 — это OBD-коды P0xxx/P1xxx в другой записи
      * (P0xxx → 16384 + xxx, P1xxx → 16408 + 1xxx).
      */

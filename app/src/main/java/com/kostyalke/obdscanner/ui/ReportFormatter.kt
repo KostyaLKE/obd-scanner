@@ -61,7 +61,7 @@ object ReportFormatter {
                     m.dtcs.isEmpty() -> "ошибок нет"
                     else -> "ошибок ${m.dtcs.size}"
                 })
-                for (d in m.dtcs) appendLine("    " + vagDtcText(d.code, db))
+                for (d in m.dtcs) appendLine("    " + vagDtcText(d, db))
             }
             val silent = vag.filter { !it.responded }.joinToString(", ") { it.module.addressText }
             if (silent.isNotEmpty()) appendLine("  Не ответили: $silent")
@@ -71,6 +71,15 @@ object ReportFormatter {
             r.notes.forEach { appendLine("Примечание: $it") }
         }
     }
+}
+
+/** Текст ошибки блока для KWP2000 и UDS. */
+fun vagDtcText(d: com.kostyalke.obdscanner.vag.VagDtc, db: DtcDatabase): String {
+    if (!d.uds) return vagDtcText(d.code, db)
+    val base = com.kostyalke.obdscanner.obd.DtcDecoder.decode((d.code shr 16) and 0xFF, (d.code shr 8) and 0xFF)
+    val ftb = d.code and 0xFF
+    val desc = db.info(base).description
+    return "$base" + (if (ftb != 0) " · %02X".format(ftb) else "") + " — " + (desc ?: "расшифровки нет, ищите по коду")
 }
 
 /** «00283 — Датчик скорости…» или для двигателя «16785 (P0401) — Рециркуляция ОГ…». */

@@ -434,6 +434,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         service = null
     }
 
+    private fun log(text: String) = appendLog(LogLine(System.currentTimeMillis(), false, text))
+
     private fun appendLog(line: LogLine) {
         _log.update { (it + line).takeLast(600) }
     }
@@ -495,17 +497,57 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             try {
                 withService { s ->
                     s.elm.exclusive { send ->
+                        val list = VagModules.scanList
+                        val total = list.size * 2f
+                        // 1) KWP2000 по TP2.0 — старые блоки VAG.
                         val tp = Tp20(send)
+                        var rawOk = true
                         try {
                             tp.enterRawMode()
-                            val list = VagModules.scanList
                             list.forEachIndexed { i, m ->
-                                _vag.update { it.copy(current = m.title, progress = i.toFloat() / list.size) }
+                                _vag.update { it.copy(current = "${m.title} (TP2.0)", progress = i / total) }
                                 val r = Tp20.scanModule(tp, m)
                                 _vag.update { it.copy(results = it.results + r) }
                             }
+                        } catch (e: VagException) {
+                            // Адаптер не умеет «сырой» CAN — сразу к UDS.
+                            rawOk = false
+                            log("VAG: TP2.0 недоступен: ${e.message}")
+                            _vag.update { st -> st.copy(results = list.map { VagModuleResult(it, null, emptyList(), false) }) }
                         } finally {
                             tp.restore()
+                        }
+                        // 2) UDS — для тех, кто промолчал (новые блоки, например двигатель EDC17).
+                        val silent = _vag.value.results.filter { !it.responded }
+                        if (silent.isNotEmpty()) {
+                            val uds = com.kostyalke.obdscanner.vag.Uds(send)
+                            try {
+                                uds.begin()
+                                silent.forEachIndexed { i, r ->
+                                    _vag.update { it.copy(current = "${r.module.title} (UDS)", progress = 0.5f + i / total) }
+                                    val u = runCatching { com.kostyalke.obdscanner.vag.Uds.scanModule(uds, r.module) }.getOrNull()
+                                    if (u != null) _vag.update { st ->
+                                        st.copy(results = st.results.map { if (it.module.address == u.module.address) u else it })
+                                    }
+                                }
+                            } finally {
+                                uds.restore()
+                            }
+                        }
+                        val res = _vag.value.results
+                        log("VAG: итог — " + res.joinToString(", ") {
+                            "${it.module.addressText}:" + when {
+                                !it.responded -> "нет"
+                                it.error != null -> "ошибка"
+                                else -> "${it.protocol}/${it.dtcs.size}"
+                            }
+                        } + if (!rawOk) " (TP2.0 недоступен)" else "")
+                        if (res.none { it.responded }) {
+                            _vag.update {
+                                it.copy(error = "Ни один блок не ответил ни по TP2.0, ни по UDS. Скорее всего, адаптер не " +
+                                    "поддерживает опрос блоков VAG (нужны команды ATCAF0, ATCRA, ATFCSH) — у дешёвых клонов " +
+                                    "так бывает. Пришлите журнал обмена: по нему видно точно.")
+                            }
                         }
                     }
                 }
@@ -531,22 +573,42 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     fun backupVag() {
         val st = _vag.value
         if (st.scanning || st.backingUp || !vagSupported()) return
-        val targets = st.results.filter { it.responded }.map { it.module }.ifEmpty { VagModules.scanList }
+        val responded = st.results.filter { it.responded }
+        val targets = responded.filter { it.protocol != "UDS" }.map { it.module }
+            .ifEmpty { if (responded.isEmpty()) VagModules.scanList else emptyList() }
+        val udsTargets = responded.filter { it.protocol == "UDS" }.map { it.module }
         viewModelScope.launch {
             _vag.update { it.copy(backingUp = true, error = null, backupInfo = null) }
             try {
                 val list = withService { s ->
                     s.elm.exclusive { send ->
-                        val tp = Tp20(send)
-                        try {
-                            tp.enterRawMode()
-                            targets.mapNotNull { m ->
-                                _vag.update { it.copy(current = m.title) }
-                                runCatching { Tp20.backupModule(tp, m) }.getOrNull()
+                        val out = ArrayList<com.kostyalke.obdscanner.vag.ModuleBackup>()
+                        if (targets.isNotEmpty()) {
+                            val tp = Tp20(send)
+                            try {
+                                tp.enterRawMode()
+                                targets.forEach { m ->
+                                    _vag.update { it.copy(current = m.title) }
+                                    runCatching { Tp20.backupModule(tp, m) }.getOrNull()?.let { out += it }
+                                }
+                            } catch (_: VagException) {
+                            } finally {
+                                tp.restore()
                             }
-                        } finally {
-                            tp.restore()
                         }
+                        if (udsTargets.isNotEmpty()) {
+                            val uds = com.kostyalke.obdscanner.vag.Uds(send)
+                            try {
+                                uds.begin()
+                                udsTargets.forEach { m ->
+                                    _vag.update { it.copy(current = m.title) }
+                                    runCatching { com.kostyalke.obdscanner.vag.Uds.backupModule(uds, m) }.getOrNull()?.let { out += it }
+                                }
+                            } finally {
+                                uds.restore()
+                            }
+                        }
+                        out
                     }
                 } ?: return@launch
                 if (list.isEmpty()) throw VagException("Ни один блок не отдал данные")
@@ -575,21 +637,35 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             _vag.update { it.copy(clearing = m.address, error = null) }
             try {
+                val useUds = _vag.value.results.firstOrNull { it.module.address == m.address }?.protocol == "UDS"
                 val fresh = withService { s ->
                     s.elm.exclusive { send ->
-                        val tp = Tp20(send)
-                        try {
-                            tp.enterRawMode()
-                            if (!tp.open(m)) throw VagException("Блок «${m.title}» не ответил")
+                        if (useUds) {
+                            val uds = com.kostyalke.obdscanner.vag.Uds(send)
                             try {
-                                tp.startSession()
-                                tp.clearDtcs()
+                                uds.begin()
+                                val (tx, rx) = VagModules.udsIds.getValue(m.address)
+                                uds.target(tx, rx)
+                                uds.clearDtcs()
+                                com.kostyalke.obdscanner.vag.Uds.scanModule(uds, m)
                             } finally {
-                                tp.close()
+                                uds.restore()
                             }
-                            Tp20.scanModule(tp, m)
-                        } finally {
-                            tp.restore()
+                        } else {
+                            val tp = Tp20(send)
+                            try {
+                                tp.enterRawMode()
+                                if (!tp.open(m)) throw VagException("Блок «${m.title}» не ответил")
+                                try {
+                                    tp.startSession()
+                                    tp.clearDtcs()
+                                } finally {
+                                    tp.close()
+                                }
+                                Tp20.scanModule(tp, m)
+                            } finally {
+                                tp.restore()
+                            }
                         }
                     }
                 }

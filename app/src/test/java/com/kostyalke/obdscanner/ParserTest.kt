@@ -311,4 +311,39 @@ class ParserTest {
         // После копии обычная диагностика работает
         assertEquals(listOf("P0401", "P2463"), ObdService(elm).readDtcs().stored.map { it.code })
     }
+
+    /** UDS для блока, который молчит на TP2.0: ошибки, номер детали (многокадровый ответ), сброс. */
+    @Test
+    fun udsFallback() = runBlocking {
+        val t = DemoTransport()
+        t.open()
+        val elm = Elm327(t) {}
+        elm.initialize(null) {}
+        val V = com.kostyalke.obdscanner.vag.VagModules
+        val eps = V.scanList.first { it.address == 0x44 }
+        val r = elm.exclusive { send ->
+            val tp = com.kostyalke.obdscanner.vag.Tp20(send)
+            tp.enterRawMode()
+            val viaTp = try { com.kostyalke.obdscanner.vag.Tp20.scanModule(tp, eps) } finally { tp.restore() }
+            assertTrue(!viaTp.responded)
+            val uds = com.kostyalke.obdscanner.vag.Uds(send)
+            uds.begin()
+            try {
+                val res = com.kostyalke.obdscanner.vag.Uds.scanModule(uds, eps)!!
+                uds.target(0x712, 0x77C)
+                uds.clearDtcs()
+                val after = com.kostyalke.obdscanner.vag.Uds.scanModule(uds, eps)!!
+                assertTrue(after.dtcs.isEmpty())
+                res
+            } finally {
+                uds.restore()
+            }
+        }
+        assertEquals("UDS", r.protocol)
+        assertEquals("6R0423156B · EPS ZFLS", r.partNumber)
+        assertEquals(1, r.dtcs.size)
+        assertEquals("C0545", com.kostyalke.obdscanner.obd.DtcDecoder.decode(r.dtcs[0].code shr 16, (r.dtcs[0].code shr 8) and 0xFF))
+        // Обычный OBD после UDS работает
+        assertEquals(listOf("P0401", "P2463"), ObdService(elm).readDtcs().stored.map { it.code })
+    }
 }
