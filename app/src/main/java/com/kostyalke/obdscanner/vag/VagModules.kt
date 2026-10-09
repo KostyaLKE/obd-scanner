@@ -2,7 +2,8 @@ package com.kostyalke.obdscanner.vag
 
 /** Блок управления VAG: адрес (как в VCDS, hex) и название. */
 data class VagModule(val address: Int, val title: String) {
-    val addressText: String get() = "%02X".format(address)
+    /** Адреса ≥ 0x100 — блоки, найденные перебором TP2.0 без номера VCDS (TP-адрес = address − 0x100). */
+    val addressText: String get() = if (address >= 0x100) "TP%02X".format(address - 0x100) else "%02X".format(address)
 }
 
 object VagModules {
@@ -53,6 +54,18 @@ object VagModules {
     )
 
     fun describe(code: Int): String? = known[code]
+
+    /**
+     * Логические адреса TP2.0 (НЕ равны номерам VCDS!) — запасной вариант, если шлюз не отдал таблицу.
+     * Подтверждено по открытым реализациям: 01 двигатель, 02 КПП, 03 ABS, 09 ГУР/EPS (VCDS 44),
+     * 1F шлюз; 05 подушки — по одному источнику.
+     */
+    val tpFallback: Map<Int, Int> = mapOf(0x01 to 0x01, 0x02 to 0x02, 0x03 to 0x03, 0x44 to 0x09, 0x15 to 0x05, 0x19 to 0x1F)
+
+    /** Перебор логических адресов, если шлюз молчит: так находятся и блоки, которых нет в таблице выше. */
+    val tpProbe: List<Int> = (0x01..0x1F).toList()
+
+    fun titleFor(vcds: Int): String = scanList.firstOrNull { it.address == vcds }?.title ?: "Блок %02X".format(vcds)
 
     /**
      * CAN-адреса UDS (запрос → ответ) для блоков VAG. Используются, если блок молчит на TP2.0:

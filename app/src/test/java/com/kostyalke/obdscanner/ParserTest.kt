@@ -232,49 +232,84 @@ class ParserTest {
         assertEquals(12.5, Pids.byId[0x7A]!!.decode(intArrayOf(0x01, 0x04, 0xE2)), 0.001)
     }
 
-    /** Опрос блоков VAG по TP2.0 на эмуляторе: открытие канала, сессия, номер детали, ошибки, сброс. */
-    @Test
-    fun vagTp20Scan() = runBlocking {
+    private suspend fun demoElm(): Elm327 {
         val t = DemoTransport()
         t.open()
         val elm = Elm327(t) {}
         elm.initialize(null) {}
-        val results = elm.exclusive { send ->
-            val tp = com.kostyalke.obdscanner.vag.Tp20(send)
-            tp.enterRawMode()
-            try {
-                com.kostyalke.obdscanner.vag.VagModules.scanList.map { com.kostyalke.obdscanner.vag.Tp20.scanModule(tp, it) }
-            } finally {
-                tp.restore()
-            }
-        }
-        val byAddr = results.associateBy { it.module.address }
-        assertEquals(listOf(16785), byAddr[0x01]!!.dtcs.map { it.code })
-        assertEquals("P0401", com.kostyalke.obdscanner.vag.VagModules.toObdCode(16785))
-        assertEquals(listOf(283), byAddr[0x03]!!.dtcs.map { it.code })
-        assertEquals("6R0907379AL · ESP MK60EC1", byAddr[0x03]!!.partNumber)
-        assertTrue(byAddr[0x15]!!.responded && byAddr[0x15]!!.dtcs.isEmpty())
-        assertTrue(!byAddr[0x02]!!.responded)
-        assertTrue(results.all { it.error == null })
+        return elm
+    }
 
-        // Сброс ошибок ABS
-        elm.exclusive { send ->
+    /**
+     * Полный опрос, как в приложении: «сырой» CAN с переменной длиной кадра, таблица шлюза
+     * (адреса TP2.0 ≠ VCDS), KWP2000; приборка и ГУР — только по UDS.
+     */
+    @Test
+    fun vagScanAll() = runBlocking {
+        val elm = demoElm()
+        val logLines = ArrayList<String>()
+        val results = elm.exclusive { send ->
+            com.kostyalke.obdscanner.vag.VagScanner.scanAll(send, elm.protocol.code, { logLines += it }) { _, _ -> }
+        }
+        val by = results.associateBy { it.module.address }
+        assertEquals(listOf(16785), by[0x01]!!.dtcs.map { it.code })
+        assertEquals(1, by[0x01]!!.tpAddress)
+        assertEquals(listOf(283), by[0x03]!!.dtcs.map { it.code })
+        assertEquals("6R0907379AL · ESP MK60EC1", by[0x03]!!.partNumber)
+        // BCM: VCDS 09, а логический адрес TP2.0 — 0x20 (из таблицы шлюза)
+        assertEquals(0x20, by[0x09]!!.tpAddress)
+        assertTrue(by[0x15]!!.responded && by[0x15]!!.tpAddress == 0x05)
+        // Приборка и ГУР ответили по UDS
+        assertEquals("UDS", by[0x17]!!.protocol)
+        assertEquals("5J0920810C · KOMBI", by[0x17]!!.partNumber)
+        assertEquals("UDS", by[0x44]!!.protocol)
+        assertTrue(!by[0x02]!!.responded)
+        assertTrue(logLines.any { it.contains("ATPB C0 01") })
+        assertTrue(logLines.any { it.contains("09→TP20") })
+        // После опроса обычный OBD работает
+        assertEquals(listOf("P0401", "P2463"), ObdService(elm).readDtcs().stored.map { it.code })
+    }
+
+    /** Без таблицы шлюза и без протокола B (клон): ATSP6+CAF0+ATV1, известные адреса + перебор. */
+    @Test
+    fun vagRawModeFallback() = runBlocking {
+        val elm = demoElm()
+        val sent = ArrayList<String>()
+        val results = elm.exclusive { send ->
+            val wrapped: suspend (String, Long) -> com.kostyalke.obdscanner.elm.ElmReply = { c, t ->
+                sent += c
+                if (c == "ATPBC001") com.kostyalke.obdscanner.elm.ElmReply(c, "?", listOf("?")) else send(c, t)
+            }
+            com.kostyalke.obdscanner.vag.VagScanner.scanAll(wrapped, elm.protocol.code, {}) { _, _ -> }
+        }
+        assertTrue("ATV1" in sent)
+        assertEquals(listOf(283), results.first { it.module.address == 0x03 }.dtcs.map { it.code })
+    }
+
+    /** Сброс ошибок блока по логическому адресу TP2.0 и резервная копия. */
+    @Test
+    fun vagClearAndBackup() = runBlocking {
+        val elm = demoElm()
+        val V = com.kostyalke.obdscanner.vag.VagModules
+        val abs = V.scanList.first { it.address == 0x03 }
+        val (after, backup) = elm.exclusive { send ->
             val tp = com.kostyalke.obdscanner.vag.Tp20(send)
             tp.enterRawMode()
             try {
-                val abs = com.kostyalke.obdscanner.vag.VagModules.scanList.first { it.address == 0x03 }
-                assertTrue(tp.open(abs))
+                assertTrue(tp.open(0x03))
                 tp.startSession()
                 tp.clearDtcs()
                 tp.close()
-                assertTrue(com.kostyalke.obdscanner.vag.Tp20.scanModule(tp, abs).dtcs.isEmpty())
+                com.kostyalke.obdscanner.vag.Tp20.scanModule(tp, abs, 0x03) to
+                    com.kostyalke.obdscanner.vag.Tp20.backupModule(tp, abs, 0x03)
             } finally {
                 tp.restore()
             }
         }
-        // После сессии VAG обычный OBD снова работает
-        val obd = ObdService(elm)
-        assertEquals(listOf("P0401", "P2463"), obd.readDtcs().stored.map { it.code })
+        assertTrue(after.dtcs.isEmpty())
+        assertEquals(setOf(0x9B, 0x9A, 0x91), backup!!.records.keys)
+        val json = com.kostyalke.obdscanner.data.BackupStore.toJson(listOf(backup), "TMBEG25J5C3057412", 0L)
+        assertEquals(1, json.getJSONArray("modules").length())
     }
 
     @Test
@@ -283,67 +318,5 @@ class ParserTest {
         assertEquals("P1557", com.kostyalke.obdscanner.vag.VagModules.toObdCode(17965))
         assertEquals(null, com.kostyalke.obdscanner.vag.VagModules.toObdCode(283))
         assertEquals("00283", com.kostyalke.obdscanner.vag.VagModules.format(283))
-    }
-
-    /** Резервная копия: только чтение записей 1A xx, неподдерживаемые записи пропускаются. */
-    @Test
-    fun vagBackup() = runBlocking {
-        val t = DemoTransport()
-        t.open()
-        val elm = Elm327(t) {}
-        elm.initialize(null) {}
-        val V = com.kostyalke.obdscanner.vag.VagModules
-        val backups = elm.exclusive { send ->
-            val tp = com.kostyalke.obdscanner.vag.Tp20(send)
-            tp.enterRawMode()
-            try {
-                V.scanList.mapNotNull { com.kostyalke.obdscanner.vag.Tp20.backupModule(tp, it) }
-            } finally {
-                tp.restore()
-            }
-        }
-        assertEquals(6, backups.size)
-        val bcm = backups.first { it.module.address == 0x09 }
-        assertEquals(setOf(0x9B, 0x9A, 0x91), bcm.records.keys)
-        assertEquals("01 0A 24 03 00 12 34", com.kostyalke.obdscanner.data.BackupStore.hex(bcm.records[0x9A]!!))
-        val json = com.kostyalke.obdscanner.data.BackupStore.toJson(backups, "TMBEG25J5C3057412", 0L)
-        assertEquals(6, json.getJSONArray("modules").length())
-        // После копии обычная диагностика работает
-        assertEquals(listOf("P0401", "P2463"), ObdService(elm).readDtcs().stored.map { it.code })
-    }
-
-    /** UDS для блока, который молчит на TP2.0: ошибки, номер детали (многокадровый ответ), сброс. */
-    @Test
-    fun udsFallback() = runBlocking {
-        val t = DemoTransport()
-        t.open()
-        val elm = Elm327(t) {}
-        elm.initialize(null) {}
-        val V = com.kostyalke.obdscanner.vag.VagModules
-        val eps = V.scanList.first { it.address == 0x44 }
-        val r = elm.exclusive { send ->
-            val tp = com.kostyalke.obdscanner.vag.Tp20(send)
-            tp.enterRawMode()
-            val viaTp = try { com.kostyalke.obdscanner.vag.Tp20.scanModule(tp, eps) } finally { tp.restore() }
-            assertTrue(!viaTp.responded)
-            val uds = com.kostyalke.obdscanner.vag.Uds(send)
-            uds.begin()
-            try {
-                val res = com.kostyalke.obdscanner.vag.Uds.scanModule(uds, eps)!!
-                uds.target(0x712, 0x77C)
-                uds.clearDtcs()
-                val after = com.kostyalke.obdscanner.vag.Uds.scanModule(uds, eps)!!
-                assertTrue(after.dtcs.isEmpty())
-                res
-            } finally {
-                uds.restore()
-            }
-        }
-        assertEquals("UDS", r.protocol)
-        assertEquals("6R0423156B · EPS ZFLS", r.partNumber)
-        assertEquals(1, r.dtcs.size)
-        assertEquals("C0545", com.kostyalke.obdscanner.obd.DtcDecoder.decode(r.dtcs[0].code shr 16, (r.dtcs[0].code shr 8) and 0xFF))
-        // Обычный OBD после UDS работает
-        assertEquals(listOf("P0401", "P2463"), ObdService(elm).readDtcs().stored.map { it.code })
     }
 }

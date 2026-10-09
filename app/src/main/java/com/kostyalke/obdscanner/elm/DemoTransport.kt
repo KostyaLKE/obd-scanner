@@ -85,23 +85,30 @@ class DemoTransport(
 
     private var caf = true
     private var header = 0x7DF
+    /** Пользовательский протокол B (ATPB C0 01 + ATSP B) или ATV1 — кадры переменной длины. */
+    private var protoB = false
+    private var varDlc = false
     private class DemoEcu(val part: String, val dtcs: MutableList<Pair<Int, Int>>)
+    // Ключ — ЛОГИЧЕСКИЙ адрес TP2.0 (не номер VCDS), как в настоящей машине.
     private val ecus = mapOf(
         0x01 to DemoEcu("03P906021AB  EDC17C64", mutableListOf(16785 to 0x23)), // = P0401
         0x03 to DemoEcu("6R0907379AL  ESP MK60EC1", mutableListOf(283 to 0x23)),
-        0x09 to DemoEcu("6R0937087K  BCM PQ25", mutableListOf()),
-        0x15 to DemoEcu("6R0959655C  Airbag", mutableListOf()),
-        0x17 to DemoEcu("5J0920810C   KOMBI", mutableListOf(668 to 0x25)),
-        0x19 to DemoEcu("6R0907530   Gateway", mutableListOf()),
+        0x20 to DemoEcu("6R0937087K  BCM PQ25", mutableListOf()),
+        0x05 to DemoEcu("6R0959655C  Airbag", mutableListOf()),
+        0x1F to DemoEcu("6R0907530   Gateway", mutableListOf()),
     )
+    /** Таблица шлюза 1A 9F: адрес VCDS → логический адрес TP2.0. */
+    private val gatewayTable = listOf(0x01 to 0x01, 0x03 to 0x03, 0x09 to 0x20, 0x15 to 0x05, 0x19 to 0x1F)
     private var ecu: DemoEcu? = null
     private var ecuSeq = 0
 
     private fun hexLine(id: Int, vararg b: Int) = "%03X ".format(id) + b.joinToString(" ") { "%02X".format(it) }
 
     private fun tp20(b: List<Int>): List<String> {
+        // Как настоящие блоки VAG: кадр открытия канала, дополненный до 8 байт, игнорируется.
+        if (!protoB && !varDlc && header == 0x200) return listOf("NO DATA")
         if (header == 0x200) {
-            if (b.size >= 7 && b[1] == 0xC0) {
+            if (b.size == 7 && b[1] == 0xC0) {
                 val e = ecus[b[0]] ?: return listOf("NO DATA")
                 ecu = e
                 ecuSeq = 0
@@ -125,6 +132,8 @@ class DemoTransport(
                 val resp: List<Int> = when {
                     kwp == listOf(0x10, 0x89) -> listOf(0x50, 0x89)
                     kwp == listOf(0x1A, 0x9B) -> listOf(0x5A, 0x9B) + e.part.map { it.code }
+                    kwp == listOf(0x1A, 0x9F) && e.part.contains("Gateway") ->
+                        listOf(0x5A, 0x9F) + gatewayTable.flatMap { (v, t) -> listOf(v, t, 0x00, 0x00) }
                     kwp == listOf(0x18, 0x02, 0xFF, 0x00) ->
                         listOf(0x58, e.dtcs.size) + e.dtcs.flatMap { (c, st) -> listOf(c shr 8, c and 0xFF, st) }
                     kwp == listOf(0x14, 0xFF, 0x00) -> { e.dtcs.clear(); listOf(0x54, 0xFF, 0x00) }
@@ -146,6 +155,17 @@ class DemoTransport(
     // Блок только с UDS (как новые блоки VAG): усилитель руля, запрос 0x712 → ответ 0x77C.
     private val epsDtcs = mutableListOf(0x454500 to 0x09) // C0545, подтверждена
 
+    private fun udsKombi(b: List<Int>): List<String> {
+        val resp: List<Int> = when {
+            b == listOf(0x19, 0x02, 0xFF) -> listOf(0x59, 0x02, 0xFF)
+            b == listOf(0x22, 0xF1, 0x87) -> listOf(0x62, 0xF1, 0x87) + "5J0920810C ".map { it.code }
+            b == listOf(0x22, 0xF1, 0x97) -> listOf(0x62, 0xF1, 0x97) + "KOMBI".map { it.code }
+            b == listOf(0x22, 0x06, 0x00) -> listOf(0x62, 0x06, 0x00, 0x0A, 0x0B)
+            else -> listOf(0x7F, b.firstOrNull() ?: 0, 0x31)
+        }
+        return canFrames(resp.toIntArray(), from = 0x77E)
+    }
+
     private fun udsPowerSteering(b: List<Int>): List<String> {
         val resp: List<Int> = when {
             b == listOf(0x19, 0x02, 0xFF) -> listOf(0x59, 0x02, 0xFF) +
@@ -160,15 +180,26 @@ class DemoTransport(
         return canFrames(resp.toIntArray(), from = 0x77C)
     }
 
+    /** Байты команды; нечётная последняя цифра — это «сколько ответов ждать», её отбрасываем. */
+    private fun rawBytes(cmd: String): List<Int> =
+        (if (cmd.length % 2 == 1) cmd.dropLast(1) else cmd).chunked(2).mapNotNull { it.toIntOrNull(16) }
+
     private fun respond(cmd: String): List<String> {
         if (!kLine) {
             when {
                 cmd == "ATCAF0" -> { caf = false; return listOf("OK") }
                 cmd == "ATCAF1" -> { caf = true; return listOf("OK") }
+                cmd == "ATPBC001" -> return listOf("OK")
+                cmd == "ATSPB" -> { protoB = true; return listOf("OK") }
+                cmd.startsWith("ATSP") -> { protoB = false; proto = cmd.getOrElse(4) { '0' }; return listOf("OK") }
+                cmd == "ATV1" -> { varDlc = true; return listOf("OK") }
+                cmd == "ATV0" -> { varDlc = false; return listOf("OK") }
+                cmd.startsWith("ATCF") || cmd.startsWith("ATCM") || cmd.startsWith("ATFC") -> return listOf("OK")
                 cmd.startsWith("ATSH") -> { header = cmd.drop(4).toIntOrNull(16) ?: header; return listOf("OK") }
                 cmd.startsWith("ATCRA") || cmd.startsWith("ATST") || cmd.startsWith("ATR") -> return listOf("OK")
-                !caf && !cmd.startsWith("AT") -> return tp20(cmd.chunked(2).mapNotNull { it.toIntOrNull(16) })
-                caf && !cmd.startsWith("AT") && header == 0x712 -> return udsPowerSteering(cmd.chunked(2).mapNotNull { it.toIntOrNull(16) })
+                (!caf || protoB) && !cmd.startsWith("AT") -> return tp20(rawBytes(cmd))
+                caf && !cmd.startsWith("AT") && header == 0x712 -> return udsPowerSteering(rawBytes(cmd))
+                caf && !cmd.startsWith("AT") && header == 0x714 -> return udsKombi(rawBytes(cmd))
             }
         }
         if (cmd == "ATKW0") kw0 = true
