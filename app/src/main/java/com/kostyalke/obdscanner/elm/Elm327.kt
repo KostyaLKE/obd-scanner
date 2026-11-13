@@ -94,7 +94,8 @@ class Elm327(
         sessionLock.withLock { block { cmd, timeout -> sendRaw(cmd, timeout) } }
 
     private suspend fun sendRaw(command: String, timeoutMs: Long): ElmReply = mutex.withLock {
-        transport.clearInput()
+        val stale = transport.clearInput().trim()
+        if (stale.isNotEmpty()) onLog(LogLine(System.currentTimeMillis(), false, "$stale ⚠ лишние данные до команды"))
         onLog(LogLine(System.currentTimeMillis(), true, command))
         transport.write(command + "\r")
         val raw = try {

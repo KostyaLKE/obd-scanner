@@ -174,7 +174,7 @@ class ParserTest {
             override suspend fun write(text: String) { last = text.trim() }
             override suspend fun readUntilPrompt(timeoutMs: Long) =
                 if (last.startsWith("AT")) "OK\r" else "UNABLE TO CONNECT\r"
-            override suspend fun clearInput() {}
+            override suspend fun clearInput() = ""
             override fun close() {}
         }
         try {

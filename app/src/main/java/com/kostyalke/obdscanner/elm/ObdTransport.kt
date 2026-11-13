@@ -7,8 +7,8 @@ interface ObdTransport {
     suspend fun write(text: String)
     /** Читает ответ до приглашения '>' (без него). Бросает [ElmTimeoutException] по таймауту. */
     suspend fun readUntilPrompt(timeoutMs: Long): String
-    /** Выбрасывает непрочитанные данные из входного буфера. */
-    suspend fun clearInput()
+    /** Выбрасывает непрочитанные данные из входного буфера; возвращает выброшенное (для журнала). */
+    suspend fun clearInput(): String
     fun close()
 }
 

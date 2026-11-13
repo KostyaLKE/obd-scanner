@@ -21,11 +21,15 @@ class BluetoothTransport(
 
     override val name: String = device.name ?: device.address
 
-    private var socket: BluetoothSocket? = null
-    private var input: InputStream? = null
-    private var output: OutputStream? = null
+    @Volatile private var socket: BluetoothSocket? = null
+    @Volatile private var input: InputStream? = null
+    @Volatile private var output: OutputStream? = null
+    /** Сокет, который сейчас подключается: [close] должен прервать и его. */
+    @Volatile private var connecting: BluetoothSocket? = null
+    @Volatile private var closed = false
+    private val reader = PromptReader()
 
-    override suspend fun open() = withContext(Dispatchers.IO) {
+    override suspend fun open() {
         // Остановить поиск устройств (он тормозит соединение). На Android 12+ для этого нужно
         // отдельное разрешение BLUETOOTH_SCAN, которого у нас нет — тогда просто продолжаем.
         try {
@@ -43,22 +47,28 @@ class BluetoothTransport(
             },
         )
         for (create in attempts) {
+            if (closed) throw IOException("Подключение отменено")
             val s = try {
                 create()
             } catch (e: Exception) {
                 lastError = e
                 continue
             }
+            connecting = s
             try {
-                s.connect()
+                // connect() блокирует поток; прервать его можно только закрытием ЭТОГО сокета.
+                abortable(CONNECT_TIMEOUT_MS, abort = { catching { s.close() } }) { s.connect() }
+                if (closed) { catching { s.close() }; throw IOException("Подключение отменено") }
                 socket = s
                 input = s.inputStream
                 output = s.outputStream
-                return@withContext
+                return
             } catch (e: IOException) {
                 lastError = e
-                runCatching { s.close() }
+                catching { s.close() }
                 delay(300)
+            } finally {
+                connecting = null
             }
         }
         throw IOException(
@@ -75,37 +85,19 @@ class BluetoothTransport(
     }
 
     override suspend fun readUntilPrompt(timeoutMs: Long): String = withContext(Dispatchers.IO) {
-        val inp = input ?: throw IOException("Нет соединения")
-        val sb = StringBuilder()
-        val deadline = System.currentTimeMillis() + timeoutMs
-        val buf = ByteArray(256)
-        while (true) {
-            val available = inp.available()
-            if (available > 0) {
-                val n = inp.read(buf, 0, minOf(available, buf.size))
-                for (i in 0 until n) {
-                    val c = (buf[i].toInt() and 0xFF).toChar()
-                    if (c == '>') return@withContext sb.toString()
-                    if (c != '\u0000') sb.append(c)
-                }
-            } else {
-                if (System.currentTimeMillis() > deadline) throw ElmTimeoutException(sb.toString())
-                delay(5)
-            }
-        }
-        @Suppress("UNREACHABLE_CODE")
-        sb.toString()
+        reader.read(input ?: throw IOException("Нет соединения"), timeoutMs)
     }
 
-    override suspend fun clearInput() = withContext(Dispatchers.IO) {
-        val inp = input ?: return@withContext
-        while (inp.available() > 0) inp.skip(inp.available().toLong())
+    override suspend fun clearInput(): String = withContext(Dispatchers.IO) {
+        input?.let { reader.clear(it) } ?: ""
     }
 
     override fun close() {
-        runCatching { input?.close() }
-        runCatching { output?.close() }
-        runCatching { socket?.close() }
+        closed = true
+        connecting?.let { catching { it.close() } }
+        catching { input?.close() }
+        catching { output?.close() }
+        catching { socket?.close() }
         socket = null
         input = null
         output = null
@@ -113,5 +105,6 @@ class BluetoothTransport(
 
     companion object {
         val SPP_UUID: UUID = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB")
+        const val CONNECT_TIMEOUT_MS = 12_000L
     }
 }

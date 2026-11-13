@@ -34,7 +34,7 @@ class DtcReadTest {
             last.startsWith("AT") -> "OK"
             else -> "NO DATA"
         } + "\r"
-        override suspend fun clearInput() {}
+        override suspend fun clearInput() = ""
         override fun close() {}
     }
 

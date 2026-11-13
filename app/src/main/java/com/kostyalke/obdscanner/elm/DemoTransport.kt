@@ -31,7 +31,7 @@ class DemoTransport(
         pending = text.trim().uppercase().replace(" ", "")
     }
 
-    override suspend fun clearInput() {}
+    override suspend fun clearInput() = ""
 
     override fun close() {}
 
