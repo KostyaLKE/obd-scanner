@@ -1,10 +1,13 @@
 package com.kostyalke.obdscanner.obd
 
-enum class DtcKind(val title: String, val service: Int) {
-    STORED("Сохранённые (подтверждённые)", 0x03),
-    PENDING("Ожидающие (текущий цикл)", 0x07),
-    PERMANENT("Постоянные (не стираются сканером)", 0x0A),
+enum class DtcKind(val title: String, val short: String, val service: Int) {
+    STORED("Сохранённые (подтверждённые)", "сохранённые", 0x03),
+    PENDING("Ожидающие (текущий цикл)", "ожидающие", 0x07),
+    PERMANENT("Постоянные (не стираются сканером)", "постоянные", 0x0A),
 }
+
+/** Ответ на запрос ошибок не соответствует формату — его нельзя считать «ошибок нет». */
+class DtcFormatException(message: String) : Exception(message)
 
 data class Dtc(val code: String, val ecu: String, val kind: DtcKind)
 
@@ -16,15 +19,24 @@ object DtcDecoder {
     }
 
     /**
-     * Ответы 43/47/4A. CAN: [43, N, a1, b1, …]; K-line: [43, a1, b1, a2, b2, a3, b3] в каждой строке,
-     * пустые слоты = 00 00.
+     * Ответы 43/47/4A. CAN: [43, N, a1, b1, …] — ровно N пар; K-line: [43, a1, b1, a2, b2, a3, b3]
+     * в каждой строке, пустые слоты = 00 00. Длина, не совпадающая с форматом, — [DtcFormatException].
      */
-    fun parse(messages: List<EcuMessage>, kind: DtcKind): List<Dtc> {
+    fun parse(messages: List<EcuMessage>, kind: DtcKind, can: Boolean): List<Dtc> {
         val result = LinkedHashSet<Dtc>()
         for (m in messages.forService(kind.service)) {
             val d = m.data
-            // [сервис, пары…] — нечётная длина; [сервис, счётчик, пары…] (CAN) — чётная.
-            var i = if (d.size % 2 == 0) 2 else 1
+            val start = if (can) {
+                if (d.size < 2) throw DtcFormatException("нет счётчика ошибок")
+                if (d.size != 2 + 2 * d[1]) {
+                    throw DtcFormatException("блок сообщил ${d[1]} ошибок, а данных на ${(d.size - 2) / 2}")
+                }
+                2
+            } else {
+                if (d.size < 3 || (d.size - 1) % 2 != 0) throw DtcFormatException("неверная длина ответа K-line")
+                1
+            }
+            var i = start
             while (i + 1 < d.size) {
                 val a = d[i]
                 val b = d[i + 1]

@@ -72,6 +72,17 @@ class ScreenShots {
         })
     }
 
+    @Test fun errorsIncomplete() = shot("02b_errors_incomplete", true, shell(Tab.ERRORS, 0) {
+        ErrorsContent(DtcState(report = report.copy(stored = emptyList(), pending = emptyList(),
+            readiness = readiness.copy(milOn = false, dtcCount = 0), freezeFrame = null, notes = emptyList(),
+            reads = listOf(
+                com.kostyalke.obdscanner.obd.DtcRead(DtcKind.STORED, com.kostyalke.obdscanner.obd.ReadStatus.NO_RESPONSE, "NO DATA"),
+                com.kostyalke.obdscanner.obd.DtcRead(DtcKind.PENDING, com.kostyalke.obdscanner.obd.ReadStatus.OK),
+                com.kostyalke.obdscanner.obd.DtcRead(DtcKind.PERMANENT, com.kostyalke.obdscanner.obd.ReadStatus.REJECTED, "код 22"),
+            ))),
+            emptyList(), db::info, {}, {}, {})
+    })
+
     @Test fun errorsNone() = shot("02_errors_none", true, shell(Tab.ERRORS, 0) {
         ErrorsContent(DtcState(report = report.copy(stored = emptyList(), pending = emptyList(),
             readiness = readiness.copy(milOn = false, dtcCount = 0), freezeFrame = null, notes = emptyList())),

@@ -3,7 +3,7 @@ package com.kostyalke.obdscanner.obd
 import com.kostyalke.obdscanner.elm.ObdProtocol
 
 /** Сообщение от одного блока управления (заголовок/адрес + полезные данные). */
-class EcuMessage(val ecu: String, val data: IntArray) {
+class EcuMessage(val ecu: String, val data: IntArray, val incomplete: Boolean = false) {
     override fun toString(): String = "$ecu: " + data.joinToString(" ") { "%02X".format(it) }
 }
 
@@ -94,8 +94,8 @@ object ResponseParser {
         for (acc in byHeader.values) {
             val name = canEcuName(acc.header)
             acc.done.forEach { result += EcuMessage(name, it) }
-            // Недособранное сообщение всё равно отдаём — лучше часть данных, чем ничего.
-            if (acc.expected >= 0 && acc.data.isNotEmpty()) result += EcuMessage(name, acc.data.toIntArray())
+            // Недособранное сообщение помечаем: потребитель не должен принимать его за полный ответ.
+            if (acc.expected >= 0 && acc.data.isNotEmpty()) result += EcuMessage(name, acc.data.toIntArray(), incomplete = true)
         }
         return result
     }

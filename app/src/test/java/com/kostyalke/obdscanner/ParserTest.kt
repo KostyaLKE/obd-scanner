@@ -65,7 +65,7 @@ class ParserTest {
     fun canDtcsWithCountAndTwoEcus() {
         val lines = listOf("7E8 06 43 02 01 01 15 57", "7E9 02 43 00")
         val msgs = ResponseParser.parse(lines, ObdProtocol.CAN_11_500)
-        val dtcs = DtcDecoder.parse(msgs, DtcKind.STORED)
+        val dtcs = DtcDecoder.parse(msgs, DtcKind.STORED, can = true)
         assertEquals(listOf("P0101", "P1557"), dtcs.map { it.code })
     }
 
@@ -84,7 +84,7 @@ class ParserTest {
             "48 6B 10 43 03 80 00 00 00 00 00",
         )
         val msgs = ResponseParser.parse(lines, ObdProtocol.ISO_9141)
-        val dtcs = DtcDecoder.parse(msgs, DtcKind.STORED)
+        val dtcs = DtcDecoder.parse(msgs, DtcKind.STORED, can = false)
         assertEquals(listOf("P0401", "P1557", "P0234", "P0380"), dtcs.map { it.code })
         assertEquals("Двигатель (10)", dtcs[0].ecu)
     }

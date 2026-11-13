@@ -2,6 +2,7 @@ package com.kostyalke.obdscanner.obd
 
 import com.kostyalke.obdscanner.elm.Elm327
 import com.kostyalke.obdscanner.elm.ElmReply
+import com.kostyalke.obdscanner.elm.ElmTimeoutException
 
 class ObdException(message: String) : Exception(message)
 
@@ -14,8 +15,43 @@ data class DtcReport(
     val freezeFrame: FreezeFrame?,
     /** Сервисы, которые машина не поддерживает (например, 0A на старых авто). */
     val notes: List<String>,
+    /** Итог каждого запроса ошибок. Пустой список ошибок достоверен только при [ReadStatus.OK]. */
+    val reads: List<DtcRead> = emptyList(),
 ) {
     val all: List<Dtc> get() = stored + pending + permanent
+
+    fun statusOf(kind: DtcKind): ReadStatus? = reads.firstOrNull { it.kind == kind }?.status
+
+    /** Запросы, которые не дали достоверного ответа. */
+    val failed: List<DtcRead> get() = reads.filter { it.status != ReadStatus.OK && it.status != ReadStatus.SKIPPED }
+
+    val isComplete: Boolean get() = failed.isEmpty()
+
+    /** Check Engine или счётчик ошибок блока противоречат прочитанному списку. */
+    val mismatch: String? get() {
+        val rd = readiness ?: return null
+        if (statusOf(DtcKind.STORED) != ReadStatus.OK) return null
+        val confirmed = stored.size + permanent.size
+        return when {
+            rd.dtcCount > stored.size ->
+                "Блок насчитал ошибок: ${rd.dtcCount}, а прочитано: ${stored.size}"
+            rd.milOn && confirmed == 0 -> "Check Engine горит, но подтверждённых ошибок не прочитано"
+            else -> null
+        }
+    }
+}
+
+enum class ReadStatus(val text: String) {
+    OK("прочитано"),
+    NOT_SUPPORTED("блок не поддерживает запрос"),
+    NO_RESPONSE("блок не ответил"),
+    REJECTED("блок отказал"),
+    CORRUPT("ответ повреждён или неполный"),
+    SKIPPED("не запрашивалось"),
+}
+
+data class DtcRead(val kind: DtcKind, val status: ReadStatus, val detail: String? = null) {
+    val text: String get() = "${kind.short}: ${status.text}" + (detail?.let { " ($it)" } ?: "")
 }
 
 data class FreezeFrame(val dtc: String?, val values: List<Pair<PidDef, Double>>)
@@ -79,32 +115,52 @@ class ObdService(val elm: Elm327) {
 
     suspend fun readiness(): Readiness? = readPidRaw(0x01, 4)?.let { Readiness.decode(it) }
 
-    private suspend fun readDtcKind(kind: DtcKind, notes: MutableList<String>): List<Dtc> {
-        val (reply, msgs) = query("%02X".format(kind.service), 10000)
-        if (reply.isNoData) return emptyList()
+    private suspend fun readDtcKind(kind: DtcKind): Pair<List<Dtc>, DtcRead> {
+        fun fail(status: ReadStatus, detail: String? = null) = emptyList<Dtc>() to DtcRead(kind, status, detail)
+        val (reply, msgs) = try {
+            query("%02X".format(kind.service), 10000)
+        } catch (e: ElmTimeoutException) {
+            if (kind == DtcKind.STORED) throw e
+            return fail(ReadStatus.NO_RESPONSE, "таймаут")
+        }
+        val upper = reply.lines.map { it.uppercase() }
+        if (upper.any { it.contains("DATA ERROR") || it == "BUFFER FULL" || it.startsWith("<") }) {
+            return fail(ReadStatus.CORRUPT, reply.error)
+        }
         reply.error?.let {
             if (kind == DtcKind.STORED) throw ObdException(it)
-            notes += "${kind.title}: блок не поддерживает запрос"
-            return emptyList()
+            return fail(ReadStatus.NO_RESPONSE, it)
         }
-        if (msgs.any { it.data.size >= 2 && it.data[0] == 0x7F }) {
-            notes += "${kind.title}: блок не поддерживает запрос"
-            return emptyList()
+        if (reply.isNoData) return fail(ReadStatus.NO_RESPONSE, "NO DATA")
+        val positive = msgs.forService(kind.service)
+        val negative = msgs.filter { it.data.size >= 3 && it.data[0] == 0x7F && it.data[1] == kind.service }
+        if (positive.isEmpty()) {
+            val n = negative.firstOrNull() ?: return fail(ReadStatus.CORRUPT, "нет разборчивого ответа")
+            val nrc = n.data[2]
+            return fail(if (nrc == 0x11 || nrc == 0x12) ReadStatus.NOT_SUPPORTED else ReadStatus.REJECTED,
+                "код %02X".format(nrc))
         }
-        return DtcDecoder.parse(msgs, kind)
+        if (positive.any { it.incomplete }) return fail(ReadStatus.CORRUPT, "сообщение собрано не полностью")
+        val dtcs = try {
+            DtcDecoder.parse(positive, kind, protocol.isCan)
+        } catch (e: DtcFormatException) {
+            return fail(ReadStatus.CORRUPT, e.message)
+        }
+        val others = negative.joinToString(", ") { it.ecu }
+        return dtcs to DtcRead(kind, ReadStatus.OK, others.ifEmpty { null }?.let { "отказали: $it" })
     }
 
     suspend fun readDtcs(): DtcReport {
         val notes = ArrayList<String>()
         val readiness = runCatching { readiness() }.getOrNull()
-        val stored = readDtcKind(DtcKind.STORED, notes)
-        val pending = readDtcKind(DtcKind.PENDING, notes)
-        val permanent = if (protocol.isCan) readDtcKind(DtcKind.PERMANENT, notes) else {
+        val (stored, rs) = readDtcKind(DtcKind.STORED)
+        val (pending, rp) = readDtcKind(DtcKind.PENDING)
+        val (permanent, rperm) = if (protocol.isCan) readDtcKind(DtcKind.PERMANENT) else {
             notes += "Постоянные ошибки (сервис 0A) есть только на машинах с CAN — пропущено"
-            emptyList()
+            emptyList<Dtc>() to DtcRead(DtcKind.PERMANENT, ReadStatus.SKIPPED)
         }
         val ff = if (stored.isNotEmpty() || pending.isNotEmpty()) runCatching { freezeFrame() }.getOrNull() else null
-        return DtcReport(System.currentTimeMillis(), stored, pending, permanent, readiness, ff, notes)
+        return DtcReport(System.currentTimeMillis(), stored, pending, permanent, readiness, ff, notes, listOf(rs, rp, rperm))
     }
 
     suspend fun clearDtcs() {

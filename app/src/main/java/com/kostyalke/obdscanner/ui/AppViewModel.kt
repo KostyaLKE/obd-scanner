@@ -109,6 +109,8 @@ data class DtcState(
     val clearing: Boolean = false,
     val error: String? = null,
     val message: String? = null,
+    /** Последнее чтение не удалось: на экране прежний результат, его нельзя выдавать за свежий. */
+    val stale: Boolean = false,
 )
 
 class AppViewModel(app: Application) : AndroidViewModel(app) {
@@ -659,14 +661,14 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             try {
                 val r = withService { it.readDtcs() }
                 if (r != null) {
-                    _dtc.update { it.copy(report = r) }
+                    _dtc.update { it.copy(report = r, stale = false) }
                     _readiness.value = r.readiness
                     autoSave()
                 }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                _dtc.update { it.copy(error = humanError(e)) }
+                _dtc.update { it.copy(error = humanError(e), stale = it.report != null) }
             } finally {
                 _dtc.update { it.copy(loading = false) }
             }

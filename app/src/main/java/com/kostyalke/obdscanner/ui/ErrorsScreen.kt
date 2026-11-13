@@ -84,7 +84,7 @@ fun ErrorsContent(
             contentPadding = ScreenPadding,
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            item { SummaryPanel(report, st.loading) }
+            item { SummaryPanel(report, st.loading, st.stale) }
             warnings.forEach { w ->
                 item { StatusNote(w, Status.colors.warning, Icons.Filled.Warning, compact = true) }
             }
@@ -167,7 +167,7 @@ fun ErrorsContent(
 }
 
 @Composable
-private fun SummaryPanel(report: DtcReport?, loading: Boolean) {
+private fun SummaryPanel(report: DtcReport?, loading: Boolean, stale: Boolean = false) {
     if (report == null) {
         val tone = Status.colors.neutral
         Surface(Modifier.fillMaxWidth(), shape = PanelShape, color = MaterialTheme.colorScheme.surfaceContainer) {
@@ -186,17 +186,26 @@ private fun SummaryPanel(report: DtcReport?, loading: Boolean) {
     val confirmed = report.stored.size + report.permanent.size
     val pending = report.pending.size
     val mil = report.readiness?.milOn
+    val failed = report.failed
+    val mismatch = report.mismatch
+    // Зелёный — только когда все запросы дали корректный ответ и нет расхождений.
     val tone = when {
         confirmed > 0 -> Status.colors.error
-        pending > 0 || mil == true -> Status.colors.warning
+        pending > 0 || mil == true || failed.isNotEmpty() || mismatch != null || stale -> Status.colors.warning
         else -> Status.colors.ok
     }
     val title = when {
         confirmed > 0 -> "$confirmed ${plural(confirmed, "ошибка", "ошибки", "ошибок")}"
         pending > 0 -> "$pending ${plural(pending, "ожидающая", "ожидающие", "ожидающих")}"
+        failed.isNotEmpty() -> "Диагностика неполная"
+        mismatch != null -> "Данные расходятся"
         else -> "Ошибок нет"
     }
     val sub = buildList {
+        if (stale) add("Устарело: новое чтение не удалось")
+        if (failed.isNotEmpty() && (confirmed > 0 || pending > 0)) add("диагностика неполная")
+        failed.forEach { add("не прочитаны ${it.text}") }
+        mismatch?.let { add(it) }
         if (confirmed > 0 && pending > 0) add("ещё $pending ${plural(pending, "ожидающая", "ожидающие", "ожидающих")}")
         when (mil) {
             true -> add("Check Engine горит")

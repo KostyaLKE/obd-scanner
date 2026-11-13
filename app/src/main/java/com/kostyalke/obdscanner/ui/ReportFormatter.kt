@@ -26,9 +26,19 @@ object ReportFormatter {
         r.readiness?.let {
             appendLine("Check Engine: ${if (it.milOn) "ГОРИТ" else "не горит"}; ошибок по данным блока: ${it.dtcCount}")
         }
+        if (!r.isComplete) {
+            appendLine("ДИАГНОСТИКА НЕПОЛНАЯ: " + r.failed.joinToString("; ") { it.text })
+        }
+        r.mismatch?.let { appendLine("РАСХОЖДЕНИЕ: $it") }
         appendLine()
-        fun section(title: String, list: List<Dtc>) {
-            appendLine("$title: ${if (list.isEmpty()) "нет" else list.size.toString()}")
+        fun section(title: String, list: List<Dtc>, kind: com.kostyalke.obdscanner.obd.DtcKind) {
+            val read = r.reads.firstOrNull { it.kind == kind }
+            val failed = read != null && read.status != com.kostyalke.obdscanner.obd.ReadStatus.OK
+            appendLine("$title: " + when {
+                failed -> "не прочитаны — ${read!!.status.text}" + (read.detail?.let { " ($it)" } ?: "")
+                list.isEmpty() -> "нет"
+                else -> list.size.toString()
+            })
             for (d in list) {
                 val info = db.info(d.code)
                 val vag = info.vagCode?.let { " (VAG $it)" } ?: ""
@@ -36,9 +46,11 @@ object ReportFormatter {
                 info.hint?.let { appendLine("    Возможные причины: $it") }
             }
         }
-        section("Сохранённые ошибки", r.stored)
-        section("Ожидающие ошибки", r.pending)
-        if (r.permanent.isNotEmpty()) section("Постоянные ошибки", r.permanent)
+        section("Сохранённые ошибки", r.stored, com.kostyalke.obdscanner.obd.DtcKind.STORED)
+        section("Ожидающие ошибки", r.pending, com.kostyalke.obdscanner.obd.DtcKind.PENDING)
+        if (r.statusOf(com.kostyalke.obdscanner.obd.DtcKind.PERMANENT) != com.kostyalke.obdscanner.obd.ReadStatus.SKIPPED) {
+            section("Постоянные ошибки", r.permanent, com.kostyalke.obdscanner.obd.DtcKind.PERMANENT)
+        }
         r.freezeFrame?.let { ff ->
             appendLine()
             appendLine("Стоп-кадр${ff.dtc?.let { " (ошибка $it)" } ?: ""}:")
