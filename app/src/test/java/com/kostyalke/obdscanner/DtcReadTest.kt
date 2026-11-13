@@ -111,4 +111,45 @@ class DtcReadTest {
         assertEquals(ReadStatus.NO_RESPONSE, r.statusOf(DtcKind.PENDING))
         assertFalse(r.isComplete)
     }
+
+    // --- Замечания ревью 13.11 ---
+
+    @Test
+    fun truncatedSingleFrameIsCorrupt() {
+        // Кадр обещает 6 байт, а пришло 2 — это не «0 ошибок».
+        val r = read("03" to "7E8 06 43 00", "07" to "7E8 02 47 00", "0A" to "7E8 02 4A 00")
+        assertEquals(ReadStatus.CORRUPT, r.statusOf(DtcKind.STORED))
+        assertFalse(r.isComplete)
+    }
+
+    @Test
+    fun rejectionByOneEcuIsNotHiddenByAnother() {
+        val r = read("03" to "7E8 02 43 00\r7E9 03 7F 03 22", "07" to "7E8 02 47 00", "0A" to "7E8 02 4A 00")
+        assertFalse(r.isComplete)
+        assertTrue(r.failed.any { it.status == ReadStatus.REJECTED && it.ecu!!.contains("7E9") })
+    }
+
+    @Test
+    fun unsupportedServiceIsShownButNotIncomplete() {
+        val r = read("03" to "7E8 02 43 00", "07" to "7E8 02 47 00", "0A" to "7E8 03 7F 0A 11")
+        assertTrue(r.isComplete)
+        assertEquals(ReadStatus.NOT_SUPPORTED, r.statusOf(DtcKind.PERMANENT))
+        assertTrue(r.unsupported.isNotEmpty())
+    }
+
+    @Test
+    fun corruptAnswerOfOneEcuKeepsCodesOfAnother() {
+        // Двигатель вернул P0101, КПП — недособранное сообщение.
+        val r = read("03" to "7E8 04 43 01 01 01\r7E9 10 0A 43 04 01 01 15 57", "07" to "7E8 02 47 00", "0A" to "7E8 02 4A 00")
+        assertEquals(listOf("P0101"), r.stored.map { it.code })
+        assertFalse(r.isComplete)
+        assertTrue(r.failed.any { it.status == ReadStatus.CORRUPT && it.ecu!!.contains("7E9") })
+    }
+
+    @Test
+    fun badCountOfOneEcuKeepsCodesOfAnother() {
+        val r = read("03" to "7E8 04 43 01 01 01\r7E9 04 43 02 15 57", "07" to "7E8 02 47 00", "0A" to "7E8 02 4A 00")
+        assertEquals(listOf("P0101"), r.stored.map { it.code })
+        assertTrue(r.failed.any { it.status == ReadStatus.CORRUPT && it.ecu!!.contains("7E9") })
+    }
 }

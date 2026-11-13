@@ -20,17 +20,28 @@ data class DtcReport(
 ) {
     val all: List<Dtc> get() = stored + pending + permanent
 
-    fun statusOf(kind: DtcKind): ReadStatus? = reads.firstOrNull { it.kind == kind }?.status
+    /** Худший итог по виду ошибок: сбой любого блока важнее успеха другого. */
+    fun statusOf(kind: DtcKind): ReadStatus? {
+        val list = reads.filter { it.kind == kind }
+        list.firstOrNull { it in failed }?.let { return it.status }
+        if (list.any { it.status == ReadStatus.OK }) return ReadStatus.OK
+        return list.firstOrNull()?.status
+    }
 
     /** Запросы, которые не дали достоверного ответа. */
-    val failed: List<DtcRead> get() = reads.filter { it.status != ReadStatus.OK && it.status != ReadStatus.SKIPPED }
+    val failed: List<DtcRead> get() = reads.filter {
+        it.status != ReadStatus.OK && it.status != ReadStatus.SKIPPED && it.status != ReadStatus.NOT_SUPPORTED
+    }
+
+    /** Блок ответил «сервис не поддерживается» — это не сбой, но показываем. */
+    val unsupported: List<DtcRead> get() = reads.filter { it.status == ReadStatus.NOT_SUPPORTED }
 
     val isComplete: Boolean get() = failed.isEmpty()
 
     /** Check Engine или счётчик ошибок блока противоречат прочитанному списку. */
     val mismatch: String? get() {
         val rd = readiness ?: return null
-        if (statusOf(DtcKind.STORED) != ReadStatus.OK) return null
+        if (statusOf(DtcKind.STORED) != ReadStatus.OK) return null // неполноту уже показывает failed
         val confirmed = stored.size + permanent.size
         return when {
             rd.dtcCount > stored.size ->
@@ -50,8 +61,10 @@ enum class ReadStatus(val text: String) {
     SKIPPED("не запрашивалось"),
 }
 
-data class DtcRead(val kind: DtcKind, val status: ReadStatus, val detail: String? = null) {
-    val text: String get() = "${kind.short}: ${status.text}" + (detail?.let { " ($it)" } ?: "")
+/** Итог запроса ошибок; [ecu] — для ответа конкретного блока (null — запрос в целом). */
+data class DtcRead(val kind: DtcKind, val status: ReadStatus, val detail: String? = null, val ecu: String? = null) {
+    val text: String get() =
+        "${kind.short}" + (ecu?.let { ", $it" } ?: "") + ": ${status.text}" + (detail?.let { " ($it)" } ?: "")
 }
 
 data class FreezeFrame(val dtc: String?, val values: List<Pair<PidDef, Double>>)
@@ -115,8 +128,10 @@ class ObdService(val elm: Elm327) {
 
     suspend fun readiness(): Readiness? = readPidRaw(0x01, 4)?.let { Readiness.decode(it) }
 
-    private suspend fun readDtcKind(kind: DtcKind): Pair<List<Dtc>, DtcRead> {
-        fun fail(status: ReadStatus, detail: String? = null) = emptyList<Dtc>() to DtcRead(kind, status, detail)
+    /** Ошибки одного вида. Итог — по каждому ответившему блоку: сбой одного не стирает коды другого. */
+    private suspend fun readDtcKind(kind: DtcKind): Pair<List<Dtc>, List<DtcRead>> {
+        fun fail(status: ReadStatus, detail: String? = null) =
+            emptyList<Dtc>() to listOf(DtcRead(kind, status, detail))
         val (reply, msgs) = try {
             query("%02X".format(kind.service), 10000)
         } catch (e: ElmTimeoutException) {
@@ -124,30 +139,42 @@ class ObdService(val elm: Elm327) {
             return fail(ReadStatus.NO_RESPONSE, "таймаут")
         }
         val upper = reply.lines.map { it.uppercase() }
-        if (upper.any { it.contains("DATA ERROR") || it == "BUFFER FULL" || it.startsWith("<") }) {
-            return fail(ReadStatus.CORRUPT, reply.error)
-        }
-        reply.error?.let {
+        val adapterCorrupt = upper.any { it.contains("DATA ERROR") || it == "BUFFER FULL" || it.startsWith("<") }
+        reply.error?.takeIf { !adapterCorrupt }?.let {
             if (kind == DtcKind.STORED) throw ObdException(it)
             return fail(ReadStatus.NO_RESPONSE, it)
         }
-        if (reply.isNoData) return fail(ReadStatus.NO_RESPONSE, "NO DATA")
         val positive = msgs.forService(kind.service)
         val negative = msgs.filter { it.data.size >= 3 && it.data[0] == 0x7F && it.data[1] == kind.service }
-        if (positive.isEmpty()) {
-            val n = negative.firstOrNull() ?: return fail(ReadStatus.CORRUPT, "нет разборчивого ответа")
+        if (positive.isEmpty() && negative.isEmpty()) {
+            return when {
+                adapterCorrupt -> fail(ReadStatus.CORRUPT, reply.error)
+                reply.isNoData -> fail(ReadStatus.NO_RESPONSE, "NO DATA")
+                else -> fail(ReadStatus.CORRUPT, "нет разборчивого ответа")
+            }
+        }
+        val dtcs = ArrayList<Dtc>()
+        val reads = ArrayList<DtcRead>()
+        for ((ecu, list) in positive.groupBy { it.ecu }) {
+            if (list.any { it.incomplete }) {
+                reads += DtcRead(kind, ReadStatus.CORRUPT, "сообщение пришло не полностью", ecu)
+                continue
+            }
+            try {
+                dtcs += DtcDecoder.parse(list, kind, protocol.isCan)
+                reads += DtcRead(kind, ReadStatus.OK, ecu = ecu)
+            } catch (e: DtcFormatException) {
+                reads += DtcRead(kind, ReadStatus.CORRUPT, e.message, ecu)
+            }
+        }
+        for (n in negative.distinctBy { it.ecu }) {
             val nrc = n.data[2]
-            return fail(if (nrc == 0x11 || nrc == 0x12) ReadStatus.NOT_SUPPORTED else ReadStatus.REJECTED,
-                "код %02X".format(nrc))
+            val st = if (nrc == 0x11 || nrc == 0x12) ReadStatus.NOT_SUPPORTED else ReadStatus.REJECTED
+            reads += DtcRead(kind, st, "код %02X".format(nrc), n.ecu)
         }
-        if (positive.any { it.incomplete }) return fail(ReadStatus.CORRUPT, "сообщение собрано не полностью")
-        val dtcs = try {
-            DtcDecoder.parse(positive, kind, protocol.isCan)
-        } catch (e: DtcFormatException) {
-            return fail(ReadStatus.CORRUPT, e.message)
-        }
-        val others = negative.joinToString(", ") { it.ecu }
-        return dtcs to DtcRead(kind, ReadStatus.OK, others.ifEmpty { null }?.let { "отказали: $it" })
+        // Адаптер сообщил о повреждении части ответа — разобранное сохраняем, но полным не считаем.
+        if (adapterCorrupt) reads += DtcRead(kind, ReadStatus.CORRUPT, reply.error)
+        return dtcs.distinct() to reads
     }
 
     suspend fun readDtcs(): DtcReport {
@@ -157,10 +184,10 @@ class ObdService(val elm: Elm327) {
         val (pending, rp) = readDtcKind(DtcKind.PENDING)
         val (permanent, rperm) = if (protocol.isCan) readDtcKind(DtcKind.PERMANENT) else {
             notes += "Постоянные ошибки (сервис 0A) есть только на машинах с CAN — пропущено"
-            emptyList<Dtc>() to DtcRead(DtcKind.PERMANENT, ReadStatus.SKIPPED)
+            emptyList<Dtc>() to listOf(DtcRead(DtcKind.PERMANENT, ReadStatus.SKIPPED))
         }
         val ff = if (stored.isNotEmpty() || pending.isNotEmpty()) runCatching { freezeFrame() }.getOrNull() else null
-        return DtcReport(System.currentTimeMillis(), stored, pending, permanent, readiness, ff, notes, listOf(rs, rp, rperm))
+        return DtcReport(System.currentTimeMillis(), stored, pending, permanent, readiness, ff, notes, rs + rp + rperm)
     }
 
     suspend fun clearDtcs() {

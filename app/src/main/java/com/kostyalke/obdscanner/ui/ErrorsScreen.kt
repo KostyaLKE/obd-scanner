@@ -206,6 +206,7 @@ private fun SummaryPanel(report: DtcReport?, loading: Boolean, stale: Boolean = 
         if (failed.isNotEmpty() && (confirmed > 0 || pending > 0)) add("диагностика неполная")
         failed.forEach { add("не прочитаны ${it.text}") }
         mismatch?.let { add(it) }
+        report.unsupported.forEach { add(it.text) }
         if (confirmed > 0 && pending > 0) add("ещё $pending ${plural(pending, "ожидающая", "ожидающие", "ожидающих")}")
         when (mil) {
             true -> add("Check Engine горит")

@@ -62,7 +62,7 @@ object ResponseParser {
         class Acc(val header: String) {
             var expected = -1
             val data = ArrayList<Int>()
-            val done = ArrayList<IntArray>()
+            val done = ArrayList<Pair<IntArray, Boolean>>() // данные, неполное
         }
         val byHeader = LinkedHashMap<String, Acc>()
         for ((header, bytes) in frames) {
@@ -70,9 +70,10 @@ object ResponseParser {
             val acc = byHeader.getOrPut(header) { Acc(header) }
             val pci = bytes[0]
             when (pci shr 4) {
-                0 -> { // одиночный кадр
+                0 -> { // одиночный кадр: длина 1..7 и все обещанные байты на месте
                     val len = pci and 0x0F
-                    acc.done += bytes.copyOfRange(1, minOf(bytes.size, 1 + len))
+                    val ok = len in 1..7 && bytes.size >= 1 + len
+                    acc.done += bytes.copyOfRange(1, minOf(bytes.size, 1 + len)) to !ok
                 }
                 1 -> { // первый кадр
                     if (bytes.size < 2) continue
@@ -85,7 +86,7 @@ object ResponseParser {
                 }
             }
             if (acc.expected >= 0 && acc.data.size >= acc.expected) {
-                acc.done += acc.data.take(acc.expected).toIntArray()
+                acc.done += acc.data.take(acc.expected).toIntArray() to false
                 acc.expected = -1
                 acc.data.clear()
             }
@@ -93,7 +94,7 @@ object ResponseParser {
         val result = ArrayList<EcuMessage>()
         for (acc in byHeader.values) {
             val name = canEcuName(acc.header)
-            acc.done.forEach { result += EcuMessage(name, it) }
+            acc.done.forEach { (d, bad) -> result += EcuMessage(name, d, incomplete = bad) }
             // Недособранное сообщение помечаем: потребитель не должен принимать его за полный ответ.
             if (acc.expected >= 0 && acc.data.isNotEmpty()) result += EcuMessage(name, acc.data.toIntArray(), incomplete = true)
         }

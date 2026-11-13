@@ -109,8 +109,10 @@ data class DtcState(
     val clearing: Boolean = false,
     val error: String? = null,
     val message: String? = null,
-    /** Последнее чтение не удалось: на экране прежний результат, его нельзя выдавать за свежий. */
+    /** Последнее чтение не удалось или связь обрывалась: прежний результат нельзя выдавать за свежий. */
     val stale: Boolean = false,
+    /** Номер подключения, в котором получен [report]. */
+    val session: Int = 0,
 )
 
 class AppViewModel(app: Application) : AndroidViewModel(app) {
@@ -370,6 +372,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     }
                     prefs.edit().putString(protoKey, elm.protocol.code.toString()).apply()
                     service = ObdService(elm)
+                    session++
                     consecutiveTimeouts = 0
                     _conn.value = ConnState.Connected(t.name, elm.protocol.title, elm.version, elm.voltage, warningsFor(elm))
                     if (reconnect) {
@@ -457,6 +460,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Связь оборвалась посреди работы — тихо переподключаемся. */
     private fun onConnectionLost() {
+        markDtcStale()
         if (_conn.value !is ConnState.Connected) return
         appendLog(LogLine(System.currentTimeMillis(), false, "⚠ связь потеряна, переподключение"))
         start(reconnect = true)
@@ -654,16 +658,26 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     // ---------- Ошибки ----------
 
+    /** Номер текущего подключения; растёт при каждом успешном подключении, в т. ч. переподключении. */
+    private var session = 0
+
+    private fun markDtcStale() = _dtc.update { if (it.report != null) it.copy(stale = true) else it }
+
     fun readDtcs() {
         if (_dtc.value.loading) return
         viewModelScope.launch {
             _dtc.update { it.copy(loading = true, error = null, message = null) }
             try {
+                val sid = session
                 val r = withService { it.readDtcs() }
-                if (r != null) {
-                    _dtc.update { it.copy(report = r, stale = false) }
+                if (r != null && sid == session) {
+                    _dtc.update { it.copy(report = r, stale = false, session = sid) }
                     _readiness.value = r.readiness
                     autoSave()
+                } else {
+                    // Нет связи, обрыв посреди чтения или результат от прежнего подключения.
+                    markDtcStale()
+                    _dtc.update { it.copy(error = "Связь с адаптером потеряна — ошибки не прочитаны") }
                 }
             } catch (e: CancellationException) {
                 throw e

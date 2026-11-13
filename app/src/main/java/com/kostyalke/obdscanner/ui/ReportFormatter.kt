@@ -30,13 +30,16 @@ object ReportFormatter {
             appendLine("ДИАГНОСТИКА НЕПОЛНАЯ: " + r.failed.joinToString("; ") { it.text })
         }
         r.mismatch?.let { appendLine("РАСХОЖДЕНИЕ: $it") }
+        r.unsupported.forEach { appendLine("Не поддерживается: ${it.text}") }
         appendLine()
         fun section(title: String, list: List<Dtc>, kind: com.kostyalke.obdscanner.obd.DtcKind) {
-            val read = r.reads.firstOrNull { it.kind == kind }
-            val failed = read != null && read.status != com.kostyalke.obdscanner.obd.ReadStatus.OK
+            val st = r.statusOf(kind)
+            val problems = r.failed.any { it.kind == kind }
             appendLine("$title: " + when {
-                failed -> "не прочитаны — ${read!!.status.text}" + (read.detail?.let { " ($it)" } ?: "")
+                st == com.kostyalke.obdscanner.obd.ReadStatus.NOT_SUPPORTED -> "блок не поддерживает запрос"
+                problems && list.isEmpty() -> "не прочитаны"
                 list.isEmpty() -> "нет"
+                problems -> "${list.size} (прочитаны не все блоки)"
                 else -> list.size.toString()
             })
             for (d in list) {
