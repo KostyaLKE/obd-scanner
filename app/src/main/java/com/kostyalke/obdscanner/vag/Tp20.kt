@@ -49,6 +49,9 @@ class Tp20(
     private var rxId = 0
     private var seqOut = 0
     private var seqIn = 0
+    /** Номер и содержимое последнего принятого пакета данных; -1 — в этом канале ещё не было. */
+    private var lastInSeq = -1
+    private var lastInFrame: IntArray? = null
 
     /** Каким способом адаптер переведён в «сырой» CAN — для журнала. */
     var mode: String = "?"
@@ -124,6 +127,8 @@ class Tp20(
         txId = resp[4] or ((resp[5] and 0x0F) shl 8)
         seqOut = 0
         seqIn = 0
+        lastInSeq = -1
+        lastInFrame = null
         at("ATSH%03X".format(txId))
         filter(rxId)
         val p = send(hex(0xA0, 0x0F, 0x8A, 0xFF, 0x32, 0xFF) + "1", 3000)
@@ -156,7 +161,18 @@ class Tp20(
                 if (f.isEmpty()) continue
                 val type = f[0] shr 4
                 if (type > 3) continue // ACK (B), «не готов» (9), служебные A1/A3/A8
-                seqIn = ((f[0] and 0x0F) + 1) and 0x0F
+                val seq = f[0] and 0x0F
+                if (lastInSeq >= 0) {
+                    // Тот же пакет пришёл повторно (ELM поймал его ещё раз) — пропускаем.
+                    if (seq == lastInSeq && f.contentEquals(lastInFrame)) continue
+                    val want = (lastInSeq + 1) and 0x0F
+                    if (seq != want) {
+                        throw VagException("Нарушен порядок пакетов TP2.0: ждали %X, пришёл %X".format(want, seq))
+                    }
+                }
+                lastInSeq = seq
+                lastInFrame = f
+                seqIn = (seq + 1) and 0x0F
                 val data = f.drop(1)
                 if (expected < 0) {
                     if (data.size < 2) continue
@@ -204,10 +220,14 @@ class Tp20(
     suspend fun readDtcs(): List<VagDtc> {
         val r = request(0x18, 0x02, 0xFF, 0x00)
         if (r.firstOrNull() != 0x58) throw VagException("Блок не отдал ошибки")
-        val n = r.getOrElse(1) { 0 }
+        val n = r.getOrElse(1) { -1 }
+        // Ровно 3 байта на ошибку: иначе ответ усечён или испорчен — нельзя выдавать за полный список.
+        if (n < 0 || r.size != 2 + 3 * n) {
+            throw VagException("Ответ со списком ошибок повреждён: заявлено $n, данных ${r.size - 2} байт")
+        }
         val out = ArrayList<VagDtc>()
         var i = 2
-        while (i + 2 < r.size && out.size < n) {
+        while (i + 2 < r.size) {
             val code = (r[i] shl 8) or r[i + 1]
             if (code != 0 && code != 0xFFFF) out += VagDtc(code, r[i + 2])
             i += 3

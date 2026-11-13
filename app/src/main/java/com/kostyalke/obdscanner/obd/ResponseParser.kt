@@ -58,32 +58,59 @@ object ResponseParser {
         }
     }
 
+    /**
+     * Сборка ISO-TP по каждому блоку. Сообщение считается полным только при правильном порядке
+     * кадров: первый (1x) → последующие 21, 22, … 2F, 20, … без пропусков и повторов.
+     * Всё остальное отдаётся с пометкой [EcuMessage.incomplete].
+     */
     private fun reassembleCan(frames: List<Pair<String, IntArray>>): List<EcuMessage> {
-        class Acc(val header: String) {
+        class Acc {
             var expected = -1
+            var nextSeq = 1
             val data = ArrayList<Int>()
             val done = ArrayList<Pair<IntArray, Boolean>>() // данные, неполное
+
+            fun abort() {
+                if (expected >= 0) done += data.toIntArray() to true
+                expected = -1
+                data.clear()
+            }
         }
         val byHeader = LinkedHashMap<String, Acc>()
         for ((header, bytes) in frames) {
             if (bytes.isEmpty()) continue
-            val acc = byHeader.getOrPut(header) { Acc(header) }
+            val acc = byHeader.getOrPut(header) { Acc() }
             val pci = bytes[0]
             when (pci shr 4) {
                 0 -> { // одиночный кадр: длина 1..7 и все обещанные байты на месте
+                    acc.abort()
                     val len = pci and 0x0F
                     val ok = len in 1..7 && bytes.size >= 1 + len
                     acc.done += bytes.copyOfRange(1, minOf(bytes.size, 1 + len)) to !ok
                 }
-                1 -> { // первый кадр
-                    if (bytes.size < 2) continue
-                    acc.expected = ((pci and 0x0F) shl 8) or bytes[1]
-                    acc.data.clear()
+                1 -> { // первый кадр; длина меньше 8 в многокадровом сообщении недопустима
+                    acc.abort()
+                    val len = if (bytes.size >= 2) ((pci and 0x0F) shl 8) or bytes[1] else -1
+                    if (len < 8) {
+                        acc.done += bytes.drop(1).toIntArray() to true
+                        continue
+                    }
+                    acc.expected = len
+                    acc.nextSeq = 1
                     for (i in 2 until bytes.size) acc.data += bytes[i]
                 }
                 2 -> { // последующий кадр
+                    val seq = pci and 0x0F
+                    if (acc.expected < 0 || seq != acc.nextSeq) {
+                        // Нет начала, пропуск, повтор или перестановка — склеивать нельзя.
+                        acc.abort()
+                        acc.done += bytes.drop(1).toIntArray() to true
+                        continue
+                    }
+                    acc.nextSeq = (acc.nextSeq + 1) and 0x0F
                     for (i in 1 until bytes.size) acc.data += bytes[i]
                 }
+                else -> continue // flow control и прочее — не данные
             }
             if (acc.expected >= 0 && acc.data.size >= acc.expected) {
                 acc.done += acc.data.take(acc.expected).toIntArray() to false
@@ -92,11 +119,10 @@ object ResponseParser {
             }
         }
         val result = ArrayList<EcuMessage>()
-        for (acc in byHeader.values) {
-            val name = canEcuName(acc.header)
+        for ((header, acc) in byHeader) {
+            acc.abort() // недособранное в конце ответа
+            val name = canEcuName(header)
             acc.done.forEach { (d, bad) -> result += EcuMessage(name, d, incomplete = bad) }
-            // Недособранное сообщение помечаем: потребитель не должен принимать его за полный ответ.
-            if (acc.expected >= 0 && acc.data.isNotEmpty()) result += EcuMessage(name, acc.data.toIntArray(), incomplete = true)
         }
         return result
     }
