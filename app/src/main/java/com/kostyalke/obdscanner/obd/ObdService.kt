@@ -2,6 +2,7 @@ package com.kostyalke.obdscanner.obd
 
 import com.kostyalke.obdscanner.elm.Elm327
 import com.kostyalke.obdscanner.elm.ElmReply
+import com.kostyalke.obdscanner.elm.catching
 import com.kostyalke.obdscanner.elm.ElmTimeoutException
 
 class ObdException(message: String) : Exception(message)
@@ -179,14 +180,14 @@ class ObdService(val elm: Elm327) {
 
     suspend fun readDtcs(): DtcReport {
         val notes = ArrayList<String>()
-        val readiness = runCatching { readiness() }.getOrNull()
+        val readiness = catching { readiness() }.getOrNull()
         val (stored, rs) = readDtcKind(DtcKind.STORED)
         val (pending, rp) = readDtcKind(DtcKind.PENDING)
         val (permanent, rperm) = if (protocol.isCan) readDtcKind(DtcKind.PERMANENT) else {
             notes += "Постоянные ошибки (сервис 0A) есть только на машинах с CAN — пропущено"
             emptyList<Dtc>() to listOf(DtcRead(DtcKind.PERMANENT, ReadStatus.SKIPPED))
         }
-        val ff = if (stored.isNotEmpty() || pending.isNotEmpty()) runCatching { freezeFrame() }.getOrNull() else null
+        val ff = if (stored.isNotEmpty() || pending.isNotEmpty()) catching { freezeFrame() }.getOrNull() else null
         return DtcReport(System.currentTimeMillis(), stored, pending, permanent, readiness, ff, notes, rs + rp + rperm)
     }
 
@@ -239,11 +240,11 @@ class ObdService(val elm: Elm327) {
     }
 
     suspend fun vehicleInfo(): VehicleInfo {
-        val vin = runCatching { readInfoText(0x02) }.getOrNull()
-        val cal = runCatching { readInfoText(0x04) }.getOrNull()
-        val ecuName = runCatching { readInfoText(0x0A) }.getOrNull()
-        val std = runCatching { readPidRaw(0x1C, 1) }.getOrNull()?.let { Pids.obdStandard(it[0]) }
-        val volt = runCatching { elm.send("ATRV", 2000).lines.firstOrNull() }.getOrNull()
+        val vin = catching { readInfoText(0x02) }.getOrNull()
+        val cal = catching { readInfoText(0x04) }.getOrNull()
+        val ecuName = catching { readInfoText(0x0A) }.getOrNull()
+        val std = catching { readPidRaw(0x1C, 1) }.getOrNull()?.let { Pids.obdStandard(it[0]) }
+        val volt = catching { elm.send("ATRV", 2000).lines.firstOrNull() }.getOrNull()
         return VehicleInfo(
             vin = vin,
             calibrationIds = cal?.chunked(16)?.map { it.trim() }?.filter { it.isNotEmpty() } ?: emptyList(),
@@ -255,5 +256,5 @@ class ObdService(val elm: Elm327) {
         )
     }
 
-    suspend fun batteryVoltage(): String? = runCatching { elm.send("ATRV", 2000).lines.firstOrNull() }.getOrNull()
+    suspend fun batteryVoltage(): String? = catching { elm.send("ATRV", 2000).lines.firstOrNull() }.getOrNull()
 }

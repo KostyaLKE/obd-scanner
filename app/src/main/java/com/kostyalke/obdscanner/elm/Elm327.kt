@@ -121,13 +121,13 @@ class Elm327(
      */
     suspend fun initialize(preferred: Char?, onStep: (String) -> Unit) {
         onStep("Проверка адаптера…")
-        runCatching { send("ATD", 2000) }
-        val z = runCatching { send("ATZ", 4000) }.getOrNull()
+        catching { send("ATD", 2000) }
+        val z = catching { send("ATZ", 4000) }.getOrNull()
         delay(500)
         version = z?.lines?.firstOrNull { it.contains("ELM", true) } ?: ""
-        val e0 = runCatching { send("ATE0", 3000) }.getOrNull()
+        val e0 = catching { send("ATE0", 3000) }.getOrNull()
         if (e0 == null || e0.lines.none { it.equals("OK", true) }) {
-            val i = runCatching { send("ATI", 3000) }.getOrNull()
+            val i = catching { send("ATI", 3000) }.getOrNull()
             if (i == null || i.lines.isEmpty()) {
                 throw ConnectProblem(
                     ConnectProblem.Stage.ADAPTER,
@@ -137,7 +137,7 @@ class Elm327(
         }
         onStep("Настройка адаптера…")
         for (cmd in listOf("ATL0", "ATS1", "ATH1", "ATAT1")) {
-            val r = runCatching { send(cmd, 3000) }.getOrNull()
+            val r = catching { send(cmd, 3000) }.getOrNull()
             if (cmd == "ATH1" && (r == null || r.lines.none { it.equals("OK", true) })) {
                 throw ConnectProblem(
                     ConnectProblem.Stage.ADAPTER,
@@ -145,8 +145,8 @@ class Elm327(
                 )
             }
         }
-        if (version.isEmpty()) version = runCatching { send("ATI", 2000).lines.firstOrNull() }.getOrNull() ?: "?"
-        voltage = runCatching { send("ATRV", 2000).lines.firstOrNull() }.getOrNull()?.let(::parseVoltage)
+        if (version.isEmpty()) version = catching { send("ATI", 2000).lines.firstOrNull() }.getOrNull() ?: "?"
+        voltage = catching { send("ATRV", 2000).lines.firstOrNull() }.getOrNull()?.let(::parseVoltage)
 
         val order = buildList {
             preferred?.takeIf { it != '0' }?.let { add(it) }
@@ -159,8 +159,8 @@ class Elm327(
             val p = ObdProtocol.entries.first { it.code == code }
             onStep(if (code == '0') "Автопоиск протокола машины (до 20 с)…" else "Пробую протокол: ${p.title}…")
             val kLine = code in '3'..'5'
-            if (kLine) runCatching { send("ATKW0", 2000) }
-            runCatching { send("ATSP$code", 2000) }
+            if (kLine) catching { send("ATKW0", 2000) }
+            catching { send("ATSP$code", 2000) }
             val probe = try {
                 send("0100", if (code == '0') 20000 else if (kLine) 12000 else 5000)
             } catch (e: ElmTimeoutException) {
@@ -170,10 +170,10 @@ class Elm327(
             val ok = probe.error == null && !probe.isNoData &&
                 probe.lines.any { it.replace(" ", "").uppercase().contains("4100") }
             if (ok) {
-                val dpn = runCatching { send("ATDPN", 2000).lines.firstOrNull() }.getOrNull() ?: ""
+                val dpn = catching { send("ATDPN", 2000).lines.firstOrNull() }.getOrNull() ?: ""
                 protocol = ObdProtocol.fromDpn(dpn).takeIf { it != ObdProtocol.AUTO } ?: p
                 // Закрепляем найденный протокол, чтобы адаптер не искал его заново после паузы.
-                if (code == '0') runCatching { send("ATSP${protocol.code}", 2000) }
+                if (code == '0') catching { send("ATSP${protocol.code}", 2000) }
                 onStep("Протокол: ${protocol.title}")
                 return
             }

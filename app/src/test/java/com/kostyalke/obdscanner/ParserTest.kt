@@ -249,7 +249,7 @@ class ParserTest {
         val elm = demoElm()
         val logLines = ArrayList<String>()
         val results = elm.exclusive { send ->
-            com.kostyalke.obdscanner.vag.VagScanner.scanAll(send, elm.protocol.code, { logLines += it }) { _, _ -> }
+            com.kostyalke.obdscanner.vag.VagScanner.scanAll(send, elm.protocol.code, { logLines += it }) { _, _ -> }.results
         }
         val by = results.associateBy { it.module.address }
         assertEquals(listOf(16785), by[0x01]!!.dtcs.map { it.code })
@@ -280,7 +280,7 @@ class ParserTest {
                 sent += c
                 if (c == "ATPBC001") com.kostyalke.obdscanner.elm.ElmReply(c, "?", listOf("?")) else send(c, t)
             }
-            com.kostyalke.obdscanner.vag.VagScanner.scanAll(wrapped, elm.protocol.code, {}) { _, _ -> }
+            com.kostyalke.obdscanner.vag.VagScanner.scanAll(wrapped, elm.protocol.code, {}) { _, _ -> }.results
         }
         assertTrue("ATV1" in sent)
         assertEquals(listOf(283), results.first { it.module.address == 0x03 }.dtcs.map { it.code })

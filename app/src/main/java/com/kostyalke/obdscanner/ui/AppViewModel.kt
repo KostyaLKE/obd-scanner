@@ -31,8 +31,13 @@ import com.kostyalke.obdscanner.vag.VagModules
 import com.kostyalke.obdscanner.update.ReleaseInfo
 import com.kostyalke.obdscanner.update.Updater
 import java.io.File
+import com.kostyalke.obdscanner.elm.catching
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -167,6 +172,33 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     private var service: ObdService? = null
     private var connectJob: Job? = null
     private var liveJob: Job? = null
+
+    /**
+     * Задачи текущего подключения (операции и опрос датчиков). Отменяются все разом
+     * при отключении и переподключении — поздний результат старой связи не попадёт на экран.
+     */
+    private var sessionScope: CoroutineScope? = null
+
+    /** Одна диагностическая операция за раз: чтение, сброс, VAG, копия, ручные команды. */
+    private val opLock = Mutex()
+
+    /** Запускает операцию в задачах подключения. false — нет связи или идёт другая операция. */
+    private fun launchOp(block: suspend CoroutineScope.() -> Unit): Boolean {
+        val scope = sessionScope ?: return false
+        if (!opLock.tryLock()) return false
+        scope.launch(block = block).invokeOnCompletion { opLock.unlock() }
+        return true
+    }
+
+    /** Признак текущей операции VAG: настройки ELM не вернулись. */
+    private var adapterDirty = false
+
+    /** ELM не вернулся к OBD после опроса блоков — инициализируем адаптер заново. */
+    private fun reinitAdapter() {
+        adapterDirty = false
+        log("⚠ адаптер не вернулся к обычному OBD после опроса блоков — переподключение")
+        start(reconnect = true)
+    }
     private var liveWanted = false
     private var consecutiveTimeouts = 0
     private var autoConnectTried = false
@@ -373,6 +405,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     prefs.edit().putString(protoKey, elm.protocol.code.toString()).apply()
                     service = ObdService(elm)
                     session++
+                    sessionScope = CoroutineScope(viewModelScope.coroutineContext + SupervisorJob(viewModelScope.coroutineContext[Job]))
                     consecutiveTimeouts = 0
                     _conn.value = ConnState.Connected(t.name, elm.protocol.title, elm.version, elm.voltage, warningsFor(elm))
                     if (reconnect) {
@@ -383,7 +416,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                         _readiness.value = null
                         _dtc.value = DtcState()
                         _vag.value = VagState()
-                        runCatching { loadSupported() }
+                        catching { loadSupported() }
                         _live.update { it.copy(loading = false) }
                         if (liveWanted) launchLive()
                         readDtcs()
@@ -434,6 +467,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun closeTransport() {
+        sessionScope?.cancel()
+        sessionScope = null
         transport?.close()
         transport = null
         service = null
@@ -498,15 +533,16 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     fun scanVag() {
         if (_vag.value.scanning || !vagSupported()) return
         stopLive()
-        viewModelScope.launch {
+        launchOp {
             _vag.value = VagState(scanning = true)
             try {
                 withService { s ->
                     s.elm.exclusive { send ->
-                        val res0 = com.kostyalke.obdscanner.vag.VagScanner.scanAll(send, s.elm.protocol.code, ::log) { title, p ->
+                        val scan = com.kostyalke.obdscanner.vag.VagScanner.scanAll(send, s.elm.protocol.code, ::log) { title, p ->
                             _vag.update { it.copy(current = title, progress = p) }
                         }
-                        _vag.update { it.copy(results = res0) }
+                        _vag.update { it.copy(results = scan.results) }
+                        if (!scan.adapterRestored) adapterDirty = true
                         val res = _vag.value.results
                         log("VAG: итог — " + res.joinToString(", ") {
                             "${it.module.addressText}:" + when {
@@ -525,6 +561,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     }
                 }
                 _vag.update { it.copy(time = System.currentTimeMillis()) }
+                if (adapterDirty) reinitAdapter()
             } catch (e: CancellationException) {
                 throw e
             } catch (e: VagException) {
@@ -549,7 +586,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         val responded = st.results.filter { it.responded }
         val targets = responded.filter { it.protocol != "UDS" && it.tpAddress != null }.map { it.module to it.tpAddress!! }
         val udsTargets = responded.filter { it.protocol == "UDS" }.map { it.module }
-        viewModelScope.launch {
+        launchOp {
             _vag.update { it.copy(backingUp = true, error = null, backupInfo = null) }
             try {
                 val list = withService { s ->
@@ -561,11 +598,11 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                                 tp.enterRawMode()
                                 targets.forEach { (m, tpA) ->
                                     _vag.update { it.copy(current = m.title) }
-                                    runCatching { Tp20.backupModule(tp, m, tpA) }.getOrNull()?.let { out += it }
+                                    catching { Tp20.backupModule(tp, m, tpA) }.getOrNull()?.let { out += it }
                                 }
                             } catch (_: VagException) {
                             } finally {
-                                tp.restore()
+                                if (!tp.restore()) adapterDirty = true
                             }
                         }
                         if (udsTargets.isNotEmpty()) {
@@ -574,15 +611,16 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                                 uds.begin()
                                 udsTargets.forEach { m ->
                                     _vag.update { it.copy(current = m.title) }
-                                    runCatching { com.kostyalke.obdscanner.vag.Uds.backupModule(uds, m) }.getOrNull()?.let { out += it }
+                                    catching { com.kostyalke.obdscanner.vag.Uds.backupModule(uds, m) }.getOrNull()?.let { out += it }
                                 }
                             } finally {
-                                uds.restore()
+                                if (!uds.restore()) adapterDirty = true
                             }
                         }
                         out
                     }
-                } ?: return@launch
+                } ?: return@launchOp
+                if (adapterDirty) reinitAdapter()
                 if (list.isEmpty()) throw VagException("Ни один блок не отдал данные")
                 val time = System.currentTimeMillis()
                 val vin = _vehicle.value?.vin
@@ -606,7 +644,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     fun clearVag(m: VagModule) {
         if (_vag.value.scanning || _vag.value.clearing != null) return
-        viewModelScope.launch {
+        launchOp {
             _vag.update { it.copy(clearing = m.address, error = null) }
             try {
                 val prev = _vag.value.results.firstOrNull { it.module.address == m.address }
@@ -623,7 +661,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                                 uds.clearDtcs()
                                 com.kostyalke.obdscanner.vag.Uds.scanModule(uds, m)
                             } finally {
-                                uds.restore()
+                                if (!uds.restore()) adapterDirty = true
                             }
                         } else {
                             val tp = Tp20(send, s.elm.protocol.code, ::log)
@@ -638,7 +676,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                                 }
                                 Tp20.scanModule(tp, m, tpA)
                             } finally {
-                                tp.restore()
+                                if (!tp.restore()) adapterDirty = true
                             }
                         }
                     }
@@ -646,6 +684,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 if (fresh != null) _vag.update { st ->
                     st.copy(results = st.results.map { if (it.module.address == m.address) fresh else it })
                 }
+                if (adapterDirty) reinitAdapter()
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -664,8 +703,11 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     private fun markDtcStale() = _dtc.update { if (it.report != null) it.copy(stale = true) else it }
 
     fun readDtcs() {
-        if (_dtc.value.loading) return
-        viewModelScope.launch {
+        launchOp { doReadDtcs() }
+    }
+
+    private suspend fun doReadDtcs() {
+        run {
             _dtc.update { it.copy(loading = true, error = null, message = null) }
             try {
                 val sid = session
@@ -690,7 +732,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun clearDtcs() {
-        viewModelScope.launch {
+        launchOp {
             _dtc.update { it.copy(clearing = true, error = null, message = null) }
             try {
                 val ok = withService { it.clearDtcs(); true }
@@ -698,7 +740,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     _dtc.update { it.copy(message = "Ошибки стёрты. Повторное чтение…") }
                     delay(1500)
                     _dtc.update { it.copy(clearing = false) }
-                    readDtcs()
+                    doReadDtcs()
                 }
             } catch (e: CancellationException) {
                 throw e
@@ -747,7 +789,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         val result = ArrayList<Pair<PidDef, Double>>()
         for (pid in SINCE_CLEARED) {
             val def = Pids.byId[pid] ?: continue
-            val v = runCatching { withService { it.readPid(def) } }.getOrNull() ?: continue
+            val v = catching { withService { it.readPid(def) } }.getOrNull() ?: continue
             result += def to v
         }
         _sinceCleared.value = result
@@ -759,7 +801,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun runOp(block: suspend () -> Unit) {
         if (_busy.value) return
-        viewModelScope.launch {
+        launchOp {
             _busy.value = true
             try {
                 block()
@@ -790,9 +832,14 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun launchLive() {
         if (liveJob?.isActive == true || service == null) return
-        liveJob = viewModelScope.launch {
+        val scope = sessionScope ?: return
+        liveJob = scope.launch {
             if (_live.value.supported.isEmpty()) loadSupported()
             while (isActive && service != null) {
+                // Пока идёт операция (чтение, сброс, VAG…), датчики не опрашиваем.
+                if (opLock.isLocked) {
+                    delay(200); continue
+                }
                 val st = _live.value
                 val list = if (st.onlyFavorites && st.favorites.isNotEmpty()) {
                     st.supported.filter { it.pid in st.favorites }

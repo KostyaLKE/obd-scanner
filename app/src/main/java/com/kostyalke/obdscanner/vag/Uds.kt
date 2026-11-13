@@ -1,6 +1,10 @@
 package com.kostyalke.obdscanner.vag
 
 import com.kostyalke.obdscanner.elm.ElmReply
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
+import com.kostyalke.obdscanner.elm.catching
 import com.kostyalke.obdscanner.elm.ObdProtocol
 import com.kostyalke.obdscanner.obd.ResponseParser
 
@@ -12,15 +16,19 @@ import com.kostyalke.obdscanner.obd.ResponseParser
 class Uds(private val send: suspend (String, Long) -> ElmReply) {
 
     private suspend fun at(cmd: String): Boolean =
-        runCatching { send(cmd, 2000).lines.any { it.equals("OK", true) } }.getOrDefault(false)
+        catching { send(cmd, 2000).lines.any { it.equals("OK", true) } }.getOrDefault(false)
 
     suspend fun begin() {
         for (c in listOf("ATCAF1", "ATR1", "ATAT1", "ATST64")) at(c)
     }
 
-    /** Возврат ELM к обычному OBD-II. */
-    suspend fun restore() {
-        for (c in listOf("ATCAF1", "ATR1", "ATST32", "ATAT1", "ATCRA", "ATFCSM0", "ATSH7DF")) at(c)
+    /** Возврат ELM к обычному OBD-II, в том числе при отмене (см. [Tp20.restore]). false — не вернулся. */
+    suspend fun restore(): Boolean = withContext(NonCancellable) {
+        withTimeoutOrNull(Tp20.RESTORE_TIMEOUT_MS) {
+            val ok = listOf("ATCAF1", "ATR1", "ATST32", "ATAT1", "ATCRA", "ATFCSM0", "ATSH7DF").associateWith { at(it) }
+            val filterOk = ok.getValue("ATCRA") || (at("ATCF000") && at("ATCM000"))
+            ok.getValue("ATCAF1") && ok.getValue("ATSH7DF") && filterOk
+        } ?: false
     }
 
     /** Направляет запросы блоку: заголовок, фильтр ответов и flow control для длинных ответов. */
@@ -61,17 +69,17 @@ class Uds(private val send: suspend (String, Long) -> ElmReply) {
     }
 
     /** Текст из DID (номер детали F187, название системы F197 и т.п.). */
-    suspend fun readText(did: Int): String? = runCatching {
-        val r = request(0x22, did shr 8, did and 0xFF) ?: return@runCatching null
+    suspend fun readText(did: Int): String? = catching {
+        val r = request(0x22, did shr 8, did and 0xFF) ?: return@catching null
         r.drop(3).takeWhile { it in 0x20..0x7E }.map { it.toChar() }.joinToString("").trim().ifEmpty { null }
     }.getOrNull()
 
-    suspend fun readRaw(did: Int): IntArray? = runCatching {
+    suspend fun readRaw(did: Int): IntArray? = catching {
         request(0x22, did shr 8, did and 0xFF)?.let { it.copyOfRange(3, it.size) }
     }.getOrNull()
 
     suspend fun clearDtcs() {
-        runCatching { request(0x10, 0x03) } // расширенная сессия; часть блоков сбрасывает и без неё
+        catching { request(0x10, 0x03) } // расширенная сессия; часть блоков сбрасывает и без неё
         val r = request(0x14, 0xFF, 0xFF, 0xFF) ?: throw VagException("Блок не ответил на сброс")
         if (r[0] != 0x54) throw VagException("Блок не подтвердил сброс")
     }

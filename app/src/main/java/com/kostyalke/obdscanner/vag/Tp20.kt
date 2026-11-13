@@ -1,6 +1,10 @@
 package com.kostyalke.obdscanner.vag
 
 import com.kostyalke.obdscanner.elm.ElmReply
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
+import com.kostyalke.obdscanner.elm.catching
 
 /** Ошибка протокола VAG. Не IOException: это не обрыв Bluetooth, переподключаться не нужно. */
 class VagException(message: String) : Exception(message)
@@ -58,7 +62,7 @@ class Tp20(
         private set
 
     private suspend fun tryAt(cmd: String): Boolean =
-        runCatching { send(cmd, 2000).lines.any { it.equals("OK", true) } }.getOrDefault(false)
+        catching { send(cmd, 2000).lines.any { it.equals("OK", true) } }.getOrDefault(false)
 
     private suspend fun at(cmd: String) {
         if (!tryAt(cmd)) throw VagException("Адаптер не принял $cmd")
@@ -77,7 +81,7 @@ class Tp20(
         return reply.lines.mapNotNull { line ->
             val t = line.trim().uppercase().split(Regex("\\s+"))
             if (t.size < 2 || t[0] != id) return@mapNotNull null
-            runCatching { t.drop(1).map { it.toInt(16) }.toIntArray() }.getOrNull()
+            catching { t.drop(1).map { it.toInt(16) }.toIntArray() }.getOrNull()
         }
     }
 
@@ -104,11 +108,19 @@ class Tp20(
         log("TP2.0: режим адаптера — $mode")
     }
 
-    /** Возврат ELM к обычному OBD-II (ошибки игнорируем — делаем всё, что получится). */
-    suspend fun restore() {
-        for (c in listOf("ATSP$obdProtocol", "ATCAF1", "ATV0", "ATR1", "ATST32", "ATAT1", "ATCRA", "ATSH7DF")) {
-            runCatching { send(c, 2000) }
-        }
+    /**
+     * Возврат ELM к обычному OBD-II. Выполняется и в отменённой операции (NonCancellable),
+     * но не дольше [RESTORE_TIMEOUT_MS]. false — критичные настройки не вернулись:
+     * адаптер надо инициализировать заново, иначе обычный OBD будет «молчать».
+     */
+    suspend fun restore(): Boolean = withContext(NonCancellable) {
+        withTimeoutOrNull(RESTORE_TIMEOUT_MS) {
+            val ok = listOf("ATSP$obdProtocol", "ATCAF1", "ATV0", "ATR1", "ATST32", "ATAT1", "ATCRA", "ATSH7DF")
+                .associateWith { tryAt(it) }
+            val filterOk = ok.getValue("ATCRA") || (tryAt("ATCF000") && tryAt("ATCM000"))
+            (ok.getValue("ATSP$obdProtocol") && ok.getValue("ATCAF1") && ok.getValue("ATSH7DF") && filterOk)
+                .also { if (!it) log("TP2.0: адаптер не вернулся к OBD — " + ok.filterValues { v -> !v }.keys) }
+        } ?: false
     }
 
     /**
@@ -139,7 +151,7 @@ class Tp20(
     }
 
     suspend fun close() {
-        runCatching { send("A8", 1500) }
+        catching { send("A8", 1500) }
     }
 
     /**
@@ -183,7 +195,7 @@ class Tp20(
                 moreAfterAck = type == 0
             }
             if (expected >= 0 && collected.size >= expected) {
-                if (ackNow) runCatching { send(hex(0xB0 or seqIn), 1500) }
+                if (ackNow) catching { send(hex(0xB0 or seqIn), 1500) }
                 val msg = collected.take(expected).toIntArray()
                 if (msg.size >= 3 && msg[0] == 0x7F) {
                     if (msg[2] == 0x78) { // «ответ готовится» — ждём настоящий
@@ -197,7 +209,7 @@ class Tp20(
             }
             reply = if (ackNow && moreAfterAck) send(hex(0xB0 or seqIn), 1500) // блок ждёт ACK, чтобы слать дальше
             else {
-                if (ackNow) runCatching { send(hex(0xB0 or seqIn), 1500) }
+                if (ackNow) catching { send(hex(0xB0 or seqIn), 1500) }
                 send("A3", 1500)
             }
         }
@@ -209,7 +221,7 @@ class Tp20(
         if (r.firstOrNull() != 0x50) throw VagException("Блок не открыл диагностическую сессию")
     }
 
-    suspend fun partNumber(): String? = runCatching {
+    suspend fun partNumber(): String? = catching {
         val r = request(0x1A, 0x9B)
         if (r.size < 3 || r[0] != 0x5A) null
         // «6R0907379AL  ESP MK60EC1» → «6R0907379AL · ESP MK60EC1»
@@ -267,6 +279,8 @@ class Tp20(
     }
 
     companion object {
+        const val RESTORE_TIMEOUT_MS = 8000L
+
         /**
          * Записи, где VAG хранит номер детали, версию ПО, кодировку и код мастерской.
          * Формат зависит от блока, поэтому сохраняем их как есть и разбираем по копии с машины.
@@ -308,7 +322,7 @@ class Tp20(
 
         /** Таблица «адрес VCDS → адрес TP2.0» от шлюза (0x1F). null — шлюз не ответил. */
         suspend fun gatewayMap(tp: Tp20): Map<Int, Int>? {
-            if (!runCatching { tp.open(0x1F) }.getOrDefault(false)) return null
+            if (!catching { tp.open(0x1F) }.getOrDefault(false)) return null
             return try {
                 tp.startSession()
                 tp.readGatewayMap().ifEmpty { null }

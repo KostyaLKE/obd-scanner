@@ -1,11 +1,15 @@
 package com.kostyalke.obdscanner.vag
 
 import com.kostyalke.obdscanner.elm.ElmReply
+import com.kostyalke.obdscanner.elm.catching
 
 /**
  * Опрос всех блоков VAG: сначала TP2.0/KWP2000, затем UDS для промолчавших.
  * Вызывается внутри эксклюзивной сессии ELM; после работы адаптер возвращается к OBD-II.
  */
+/** Итог опроса; [adapterRestored] = false — ELM не вернулся к OBD, нужна повторная инициализация. */
+data class VagScan(val results: List<VagModuleResult>, val adapterRestored: Boolean)
+
 object VagScanner {
 
     suspend fun scanAll(
@@ -13,7 +17,8 @@ object VagScanner {
         obdProtocol: Char,
         log: (String) -> Unit,
         progress: (String, Float) -> Unit,
-    ): List<VagModuleResult> {
+    ): VagScan {
+        var restored = true
         val list = VagModules.scanList
         val found = ArrayList<VagModuleResult>()
 
@@ -39,7 +44,7 @@ object VagScanner {
         } catch (e: VagException) {
             log("VAG: TP2.0 недоступен: ${e.message}")
         } finally {
-            tp.restore()
+            restored = tp.restore()
         }
 
         // Все блоки из списка + найденные сверх него (только ответившие).
@@ -55,16 +60,16 @@ object VagScanner {
                 uds.begin()
                 silent.forEachIndexed { i, r ->
                     progress("${r.module.title} (UDS)", 0.6f + 0.4f * i / silent.size)
-                    val u = runCatching { Uds.scanModule(uds, r.module) }.getOrNull()
+                    val u = catching { Uds.scanModule(uds, r.module) }.getOrNull()
                     if (u != null) {
                         val idx = merged.indexOfFirst { it.module.address == u.module.address }
                         if (idx >= 0) merged[idx] = u
                     }
                 }
             } finally {
-                uds.restore()
+                restored = uds.restore() && restored
             }
         }
-        return merged
+        return VagScan(merged, restored)
     }
 }
