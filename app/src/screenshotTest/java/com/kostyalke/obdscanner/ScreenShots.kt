@@ -83,6 +83,19 @@ class ScreenShots {
             emptyList(), db::info, {}, {}, {})
     })
 
+    @Test fun clearConfirm() = shot("02c_clear_confirm", true, shell(Tab.ERRORS) {
+        ErrorsContent(DtcState(report = report, clearPrep = com.kostyalke.obdscanner.ui.ClearPrep(1, null, "Сбросить ошибки?",
+            com.kostyalke.obdscanner.obd.ClearFlow.confirmLines(listOf("ожидающие: блок не ответил (NO DATA)"), null,
+                "нет места на устройстве", 1), null)), conn.warnings, db::info, {}, {}, {})
+    })
+
+    @Test fun clearOutcome() = shot("02d_clear_outcome", true, shell(Tab.ERRORS) {
+        ErrorsContent(DtcState(report = report, outcome = com.kostyalke.obdscanner.obd.ClearFlow.evaluate(
+            com.kostyalke.obdscanner.obd.ClearResult(com.kostyalke.obdscanner.obd.ClearStatus.CONFIRMED),
+            com.kostyalke.obdscanner.obd.ControlRead(false, 0, problem = "сохранённые: блок не ответил"))),
+            emptyList(), db::info, {}, {}, {})
+    })
+
     @Test fun errorsNone() = shot("02_errors_none", true, shell(Tab.ERRORS, 0) {
         ErrorsContent(DtcState(report = report.copy(stored = emptyList(), pending = emptyList(),
             readiness = readiness.copy(milOn = false, dtcCount = 0), freezeFrame = null, notes = emptyList())),

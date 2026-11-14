@@ -1,5 +1,7 @@
 package com.kostyalke.obdscanner.ui
 
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -50,6 +52,7 @@ import com.kostyalke.obdscanner.obd.Dtc
 import com.kostyalke.obdscanner.obd.DtcInfo
 import com.kostyalke.obdscanner.obd.DtcKind
 import com.kostyalke.obdscanner.obd.DtcReport
+import com.kostyalke.obdscanner.obd.OutcomeKind
 import com.kostyalke.obdscanner.obd.FreezeFrame
 import com.kostyalke.obdscanner.obd.Pids
 import java.text.SimpleDateFormat
@@ -72,8 +75,9 @@ fun ErrorsContent(
     onVagBackup: () -> Unit = {},
     onShareBackup: (String) -> Unit = {},
     onShareLog: () -> Unit = {},
+    onConfirmClear: () -> Unit = {},
+    onCancelClear: () -> Unit = {},
 ) {
-    var confirmClear by remember { mutableStateOf(false) }
     val report = st.report
     val busy = st.loading || st.clearing
 
@@ -90,6 +94,18 @@ fun ErrorsContent(
             }
             st.error?.let { item { StatusNote(it, Status.colors.error, AppIcons.Error) } }
             st.message?.let { item { StatusNote(it, Status.colors.ok, Icons.Filled.CheckCircle) } }
+            st.warning?.let { item { StatusNote(it, Status.colors.warning, Icons.Filled.Warning) } }
+            st.outcome?.let { o ->
+                item {
+                    val tone = when (o.kind) {
+                        OutcomeKind.CLEARED -> Status.colors.ok
+                        OutcomeKind.NOT_CLEARED -> Status.colors.error
+                        else -> Status.colors.warning
+                    }
+                    val icon = if (o.kind == OutcomeKind.CLEARED) Icons.Filled.CheckCircle else Icons.Filled.Warning
+                    StatusNote(o.title + "\n" + o.details.joinToString("\n"), tone, icon)
+                }
+            }
 
             if (report != null) {
                 for (kind in DtcKind.entries) {
@@ -132,7 +148,7 @@ fun ErrorsContent(
             if (report != null) {
                 // Словами, не значком: корзину многие не понимают. Красный — действие необратимое.
                 OutlinedButton(
-                    onClick = { confirmClear = true },
+                    onClick = onClear,
                     enabled = !busy,
                     modifier = Modifier.heightIn(min = 48.dp),
                     contentPadding = ButtonPadding,
@@ -143,25 +159,19 @@ fun ErrorsContent(
         }
     }
 
-    if (confirmClear) {
+    st.clearPrep?.let { prep ->
         AlertDialog(
-            onDismissRequest = { confirmClear = false },
+            onDismissRequest = onCancelClear,
             icon = { Icon(Icons.Filled.Delete, null, tint = Status.colors.error.accent) },
-            title = { Text("Сбросить ошибки?") },
+            title = { Text(prep.title) },
+            // Прокрутка: при крупном шрифте текст не помещается, а последние строки — самые важные.
             text = {
-                Text(
-                    "Заглушите двигатель, зажигание оставьте включённым.\n\n" +
-                        "Вместе с ошибками сотрутся стоп-кадры и готовность самопроверок. " +
-                        "Если неисправность не устранена, ошибка вернётся.\n\n" +
-                        "Текущий отчёт уже сохранён в истории."
-                )
+                Column(Modifier.verticalScroll(rememberScrollState())) { Text(prep.lines.joinToString("\n\n")) }
             },
             confirmButton = {
-                TextButton(onClick = { confirmClear = false; onClear() }) {
-                    Text("Сбросить", color = Status.colors.error.accent)
-                }
+                TextButton(onClick = onConfirmClear) { Text("Сбросить", color = Status.colors.error.accent) }
             },
-            dismissButton = { TextButton(onClick = { confirmClear = false }) { Text("Отмена") } },
+            dismissButton = { TextButton(onClick = onCancelClear) { Text("Отмена") } },
         )
     }
 }

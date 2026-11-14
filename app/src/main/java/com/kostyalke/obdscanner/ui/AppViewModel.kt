@@ -17,6 +17,12 @@ import com.kostyalke.obdscanner.elm.LogLine
 import com.kostyalke.obdscanner.elm.ObdTransport
 import com.kostyalke.obdscanner.obd.DtcDatabase
 import com.kostyalke.obdscanner.obd.DtcReport
+import com.kostyalke.obdscanner.obd.ClearFlow
+import com.kostyalke.obdscanner.obd.ClearOutcome
+import com.kostyalke.obdscanner.obd.ClearResult
+import com.kostyalke.obdscanner.obd.ClearStatus
+import com.kostyalke.obdscanner.obd.ControlRead
+import com.kostyalke.obdscanner.vag.VagErrorKind
 import com.kostyalke.obdscanner.obd.ObdService
 import com.kostyalke.obdscanner.obd.PidDef
 import com.kostyalke.obdscanner.obd.Pids
@@ -119,6 +125,21 @@ data class DtcState(
     val stale: Boolean = false,
     /** Номер подключения, в котором получен [report]. */
     val session: Int = 0,
+    /** Подготовленный сброс: свежее чтение есть, отчёт «до» сохранён (или нет) — ждём подтверждения. */
+    val clearPrep: ClearPrep? = null,
+    /** Фактический итог последнего сброса (по контрольному чтению). */
+    val outcome: ClearOutcome? = null,
+    val warning: String? = null,
+)
+
+/** Сброс ждёт подтверждения. [module] = null — ошибки OBD, иначе — блок VAG. */
+data class ClearPrep(
+    val session: Int,
+    val module: VagModule?,
+    val title: String,
+    val lines: List<String>,
+    /** Имя файла отчёта «до сброса»; null — сохранить не удалось. */
+    val beforeName: String?,
 )
 
 class AppViewModel(app: Application) : AndroidViewModel(app) {
@@ -660,55 +681,83 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun clearVag(m: VagModule) {
-        if (_vag.value.scanning || _vag.value.clearing != null) return
-        launchOp {
-            _vag.update { it.copy(clearing = m.address, error = null) }
-            try {
-                val prev = _vag.value.results.firstOrNull { it.module.address == m.address }
-                val useUds = prev?.protocol == "UDS"
-                val tpA = prev?.tpAddress ?: VagModules.tpFallback[m.address] ?: m.address
-                val fresh = withService { s ->
-                    s.elm.exclusive { send ->
-                        if (useUds) {
-                            val uds = com.kostyalke.obdscanner.vag.Uds(send)
+    fun clearVag(m: VagModule) = prepareClear(m)
+
+    /** Свежее чтение одного блока VAG (TP2.0 или UDS — как он ответил при опросе). */
+    private suspend fun readVagModule(m: VagModule): VagModuleResult? {
+        val prev = _vag.value.results.firstOrNull { it.module.address == m.address }
+        val useUds = prev?.protocol == "UDS"
+        val tpA = prev?.tpAddress ?: VagModules.tpFallback[m.address] ?: m.address
+        val fresh = withService { s ->
+            s.elm.exclusive { send ->
+                if (useUds) {
+                    val uds = com.kostyalke.obdscanner.vag.Uds(send)
+                    try {
+                        uds.begin()
+                        com.kostyalke.obdscanner.vag.Uds.scanModule(uds, m)
+                    } finally {
+                        if (!uds.restore()) adapterDirty = true
+                    }
+                } else {
+                    val tp = Tp20(send, s.elm.protocol.code, ::log)
+                    try {
+                        tp.enterRawMode()
+                        Tp20.scanModule(tp, m, tpA)
+                    } finally {
+                        if (!tp.restore()) adapterDirty = true
+                    }
+                }
+            }
+        }
+        if (fresh != null) _vag.update { st ->
+            st.copy(results = st.results.map { if (it.module.address == m.address) fresh else it })
+        }
+        return fresh
+    }
+
+    /** Одна команда сброса блоку VAG. Обрыв/таймаут — результат неизвестен (без повтора). */
+    private suspend fun clearVagModule(m: VagModule): ClearResult {
+        val prev = _vag.value.results.firstOrNull { it.module.address == m.address }
+        val useUds = prev?.protocol == "UDS"
+        val tpA = prev?.tpAddress ?: VagModules.tpFallback[m.address] ?: m.address
+        return try {
+            withService { s ->
+                s.elm.exclusive { send ->
+                    if (useUds) {
+                        val uds = com.kostyalke.obdscanner.vag.Uds(send)
+                        try {
+                            uds.begin()
+                            val (tx, rx) = VagModules.udsIds.getValue(m.address)
+                            uds.target(tx, rx)
+                            uds.clearDtcs()
+                            ClearResult(ClearStatus.CONFIRMED)
+                        } finally {
+                            if (!uds.restore()) adapterDirty = true
+                        }
+                    } else {
+                        val tp = Tp20(send, s.elm.protocol.code, ::log)
+                        try {
+                            tp.enterRawMode()
+                            if (!tp.open(tpA)) return@exclusive ClearResult(ClearStatus.NOT_CONFIRMED, "блок не ответил, команда не отправлена")
                             try {
-                                uds.begin()
-                                val (tx, rx) = VagModules.udsIds.getValue(m.address)
-                                uds.target(tx, rx)
-                                uds.clearDtcs()
-                                com.kostyalke.obdscanner.vag.Uds.scanModule(uds, m)
+                                tp.startSession()
+                                tp.clearDtcs()
+                                ClearResult(ClearStatus.CONFIRMED)
                             } finally {
-                                if (!uds.restore()) adapterDirty = true
+                                tp.close()
                             }
-                        } else {
-                            val tp = Tp20(send, s.elm.protocol.code, ::log)
-                            try {
-                                tp.enterRawMode()
-                                if (!tp.open(tpA)) throw VagException("Блок «${m.title}» не ответил")
-                                try {
-                                    tp.startSession()
-                                    tp.clearDtcs()
-                                } finally {
-                                    tp.close()
-                                }
-                                Tp20.scanModule(tp, m, tpA)
-                            } finally {
-                                if (!tp.restore()) adapterDirty = true
-                            }
+                        } finally {
+                            if (!tp.restore()) adapterDirty = true
                         }
                     }
                 }
-                if (fresh != null) _vag.update { st ->
-                    st.copy(results = st.results.map { if (it.module.address == m.address) fresh else it })
-                }
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                _vag.update { it.copy(error = "Не удалось сбросить: ${e.message ?: e.javaClass.simpleName}") }
-            } finally {
-                _vag.update { it.copy(clearing = null) }
-            }
+            } ?: ClearResult(ClearStatus.UNKNOWN, "связь с адаптером прервалась")
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: VagException) {
+            ClearResult(if (e.kind == VagErrorKind.REFUSED) ClearStatus.REFUSED else ClearStatus.NOT_CONFIRMED, e.message)
+        } catch (e: Exception) {
+            ClearResult(ClearStatus.UNKNOWN, humanError(e))
         }
     }
 
@@ -723,50 +772,165 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         launchOp { doReadDtcs() }
     }
 
-    private suspend fun doReadDtcs() {
-        run {
-            _dtc.update { it.copy(loading = true, error = null, message = null) }
+    /**
+     * Чтение ошибок OBD. [save] = false — без автосохранения (в процессе сброса отчёты
+     * «до» и «после» сохраняются отдельно и связываются). null — прочитать не удалось.
+     */
+    private suspend fun doReadDtcs(save: Boolean = true): DtcReport? {
+        _dtc.update { it.copy(loading = true, error = null, message = null) }
+        try {
+            val sid = session
+            val r = withService { it.readDtcs() }
+            if (r != null && sid == session) {
+                _dtc.update { it.copy(report = r, stale = false, session = sid) }
+                _readiness.value = r.readiness
+                if (save) autoSave()
+                return r
+            }
+            // Нет связи, обрыв посреди чтения или результат от прежнего подключения.
+            markDtcStale()
+            _dtc.update { it.copy(error = "Связь с адаптером потеряна — ошибки не прочитаны") }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            _dtc.update { it.copy(error = humanError(e), stale = it.report != null) }
+        } finally {
+            _dtc.update { it.copy(loading = false) }
+        }
+        return null
+    }
+
+    fun clearDtcs() = prepareClear(null)
+
+    /** Сохраняет отчёт; ошибка сохранения возвращается текстом, а не глотается. */
+    private fun saveReport(text: String, time: Long): Pair<SavedReport?, String?> = try {
+        history.save(text, time) to null
+    } catch (e: Exception) {
+        null to (e.message ?: e.javaClass.simpleName)
+    } finally {
+        refreshReports()
+    }
+
+    private fun reportText(r: DtcReport, kind: String, extra: List<String> = emptyList()) =
+        ReportFormatter.format(r, _vehicle.value, _conn.value as? ConnState.Connected, db, _vag.value.results, kind, extra)
+
+    private fun vagReportText(m: VagModuleResult, time: Long, kind: String, extra: List<String> = emptyList()) =
+        ReportFormatter.formatVagModule(m, time, _vehicle.value, _conn.value as? ConnState.Connected, db, kind, extra)
+
+    /**
+     * Шаги 1–3 сброса: актуальное чтение → отчёт «до сброса» в историю → подтверждение.
+     * Неполнота данных и ошибка сохранения попадают в текст подтверждения.
+     */
+    private fun prepareClear(m: VagModule?) {
+        if (_dtc.value.clearPrep != null) return
+        launchOp {
+            _dtc.update { it.copy(clearing = true, error = null, message = null, warning = null, outcome = null) }
+            if (m != null) _vag.update { it.copy(clearing = m.address, error = null) }
             try {
                 val sid = session
-                val r = withService { it.readDtcs() }
-                if (r != null && sid == session) {
-                    _dtc.update { it.copy(report = r, stale = false, session = sid) }
-                    _readiness.value = r.readiness
-                    autoSave()
+                val now = System.currentTimeMillis()
+                val text: String
+                val incomplete: List<String>
+                val permanent: Int
+                if (m == null) {
+                    val r = doReadDtcs(save = false) ?: return@launchOp
+                    text = reportText(r, "до сброса")
+                    incomplete = r.failed.map { it.text }
+                    permanent = r.permanent.size
                 } else {
-                    // Нет связи, обрыв посреди чтения или результат от прежнего подключения.
-                    markDtcStale()
-                    _dtc.update { it.copy(error = "Связь с адаптером потеряна — ошибки не прочитаны") }
+                    val fresh = readVagModule(m)
+                    if (fresh == null || !fresh.responded) {
+                        _dtc.update { it.copy(warning = "Блок «${m.title}» сейчас не отвечает — сброс невозможен") }
+                        return@launchOp
+                    }
+                    text = vagReportText(fresh, now, "до сброса")
+                    incomplete = listOfNotNull(fresh.error?.let { "${m.title}: $it" })
+                    permanent = 0
                 }
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                _dtc.update { it.copy(error = humanError(e), stale = it.report != null) }
+                val (saved, saveError) = saveReport(text, now)
+                val lines = ClearFlow.confirmLines(incomplete, saved?.title, saveError, permanent) +
+                    listOfNotNull(m?.let {
+                        "Ошибки подушек безопасности с записью об аварии (crash data) так не сбрасываются."
+                    })
+                _dtc.update {
+                    it.copy(clearPrep = ClearPrep(sid, m, if (m == null) "Сбросить ошибки?" else
+                        "Сбросить ошибки блока «${m.title}» (${m.addressText})?", lines, saved?.file?.name))
+                }
             } finally {
-                _dtc.update { it.copy(loading = false) }
+                _dtc.update { it.copy(clearing = false) }
+                if (m != null) _vag.update { it.copy(clearing = null) }
             }
         }
     }
 
-    fun clearDtcs() {
-        launchOp {
-            _dtc.update { it.copy(clearing = true, error = null, message = null) }
+    fun cancelClear() = _dtc.update { it.copy(clearPrep = null) }
+
+    /**
+     * Шаги 4–7: одна команда сброса → контрольное чтение → связанный отчёт «после» →
+     * фактический итог. Подтверждение действует только в том подключении, где читали.
+     */
+    fun confirmClear() {
+        val prep = _dtc.value.clearPrep ?: return
+        _dtc.update { it.copy(clearPrep = null) }
+        val stale = "Связь переподключалась после чтения — прочитайте ошибки заново и повторите сброс."
+        if (prep.session != session || service == null) {
+            _dtc.update { it.copy(warning = stale) }
+            return
+        }
+        val started = launchOp {
+            if (prep.session != session) {
+                _dtc.update { it.copy(warning = stale) }
+                return@launchOp
+            }
+            val m = prep.module
+            _dtc.update { it.copy(clearing = true, error = null, message = null, warning = null, outcome = null) }
+            if (m != null) _vag.update { it.copy(clearing = m.address, error = null) }
             try {
-                val ok = withService { it.clearDtcs(); true }
-                if (ok == true) {
-                    _dtc.update { it.copy(message = "Ошибки стёрты. Повторное чтение…") }
-                    delay(1500)
-                    _dtc.update { it.copy(clearing = false) }
-                    doReadDtcs()
+                val cmd = if (m == null) {
+                    try {
+                        withService { it.clearDtcs() } ?: ClearResult(ClearStatus.UNKNOWN, "связь с адаптером прервалась")
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        ClearResult(ClearStatus.UNKNOWN, humanError(e))
+                    }
+                } else clearVagModule(m)
+                log("Сброс: ${cmd.text}")
+                delay(1500)
+                val now = System.currentTimeMillis()
+                val check: ControlRead
+                val body: String
+                val sameLink = session == prep.session
+                if (m == null) {
+                    val r = if (sameLink) doReadDtcs(save = false) else null
+                    check = r?.let {
+                        ControlRead(it.isComplete, it.stored.size + it.pending.size, it.permanent.size,
+                            it.failed.joinToString("; ") { f -> f.text }.ifEmpty { null })
+                    } ?: ControlRead(false, 0, problem = _dtc.value.error ?: "связь потеряна")
+                    body = r?.let { reportText(it, "после сброса") } ?: ""
+                } else {
+                    val fresh = if (sameLink) readVagModule(m) else null
+                    check = fresh?.let { ControlRead(it.responded && it.error == null, it.dtcs.size, problem = it.error) }
+                        ?: ControlRead(false, 0, problem = "блок не ответил")
+                    body = fresh?.let { vagReportText(it, now, "после сброса") } ?: ""
                 }
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                _dtc.update { it.copy(error = "Не удалось стереть: ${humanError(e)}") }
+                val outcome = ClearFlow.evaluate(cmd, check)
+                val link = "Связан с отчётом до сброса: " + (prep.beforeName ?: "не сохранён")
+                val head = listOf(link, "Итог сброса: ${outcome.title}") + outcome.details
+                val text = body.ifEmpty {
+                    "Отчёт диагностики · " + java.text.SimpleDateFormat("dd.MM.yyyy HH:mm", java.util.Locale("ru"))
+                        .format(java.util.Date(now)) + " · после сброса\n"
+                }.let { b -> b.substringBefore("\n") + "\n" + head.joinToString("\n") + "\n" + b.substringAfter("\n", "") }
+                val (_, saveError) = saveReport(text, now)
+                val shown = if (saveError == null) outcome
+                else outcome.copy(details = outcome.details + "Отчёт после сброса НЕ сохранён: $saveError")
+                _dtc.update { it.copy(outcome = shown) }
             } finally {
                 _dtc.update { it.copy(clearing = false) }
+                if (m != null) _vag.update { it.copy(clearing = null) }
             }
         }
+        if (!started) _dtc.update { it.copy(warning = "Идёт другая операция — сброс не выполнен. Повторите после её окончания.") }
     }
 
     fun buildReportText(): String? {

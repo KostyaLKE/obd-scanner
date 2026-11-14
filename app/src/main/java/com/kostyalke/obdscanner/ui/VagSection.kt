@@ -60,7 +60,6 @@ fun VagSection(
     onShareBackup: (String) -> Unit = {},
     onShareLog: () -> Unit = {},
 ) {
-    var confirm by remember { mutableStateOf<VagModule?>(null) }
     Column {
         SectionTitle("Все блоки автомобиля", trailing = st.time?.let { SimpleDateFormat("HH:mm", Locale.US).format(Date(it)) })
         if (!supported) {
@@ -87,7 +86,7 @@ fun VagSection(
             val responded = st.results.filter { it.responded }
             responded.forEachIndexed { i, r ->
                 if (i > 0 || st.scanning) PanelDivider()
-                VagRow(r, dtcText, clearing = st.clearing == r.module.address, onClear = { confirm = r.module })
+                VagRow(r, dtcText, clearing = st.clearing == r.module.address, onClear = { onClear(r.module) })
             }
             val silent = st.results.filter { !it.responded }
             if (silent.isNotEmpty() && !st.scanning) {
@@ -146,21 +145,6 @@ fun VagSection(
                 modifier = Modifier.padding(start = 4.dp, end = 4.dp, top = 8.dp),
             )
         }
-    }
-
-    confirm?.let { m ->
-        AlertDialog(
-            onDismissRequest = { confirm = null },
-            title = { Text("Сбросить ошибки блока?") },
-            text = {
-                Text("${m.title} (${m.addressText}). Если неисправность не устранена, ошибка вернётся. " +
-                    "Ошибки подушек безопасности с записью об аварии (crash data) так не сбрасываются.")
-            },
-            confirmButton = {
-                TextButton(onClick = { confirm = null; onClear(m) }) { Text("Сбросить", color = Status.colors.error.accent) }
-            },
-            dismissButton = { TextButton(onClick = { confirm = null }) { Text("Отмена") } },
-        )
     }
 }
 

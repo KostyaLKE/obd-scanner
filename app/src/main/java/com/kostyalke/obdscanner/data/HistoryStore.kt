@@ -13,8 +13,11 @@ class HistoryStore(context: Context) {
     private val dir = File(context.filesDir, "reports").apply { mkdirs() }
 
     fun save(text: String, time: Long): SavedReport {
-        val name = SimpleDateFormat("yyyy-MM-dd_HH-mm-ss", Locale.US).format(Date(time)) + ".txt"
-        val f = File(dir, name)
+        val base = SimpleDateFormat("yyyy-MM-dd_HH-mm-ss", Locale.US).format(Date(time))
+        // Два сохранения за одну секунду (до/после сброса) не должны перезаписать друг друга.
+        var f = File(dir, "$base.txt")
+        var n = 2
+        while (f.exists()) f = File(dir, "${base}_${n++}.txt")
         f.writeText(text)
         // Храним последние 100 отчётов.
         (dir.listFiles { x -> x.name.endsWith(".txt") } ?: emptyArray())

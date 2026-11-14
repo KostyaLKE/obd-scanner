@@ -18,9 +18,13 @@ object ReportFormatter {
         conn: ConnState.Connected?,
         db: DtcDatabase,
         vag: List<com.kostyalke.obdscanner.vag.VagModuleResult> = emptyList(),
+        /** «до сброса» / «после сброса» — попадает в заголовок и название в истории. */
+        kind: String? = null,
+        extra: List<String> = emptyList(),
     ): String = buildString {
         val date = SimpleDateFormat("dd.MM.yyyy HH:mm", Locale("ru")).format(Date(r.time))
-        appendLine("Отчёт диагностики · $date")
+        appendLine("Отчёт диагностики · $date" + (kind?.let { " · $it" } ?: ""))
+        extra.forEach { appendLine(it) }
         conn?.let { appendLine("Адаптер: ${it.deviceName} (${it.elmVersion}), протокол: ${it.protocol}") }
         v?.vin?.let { appendLine("VIN: $it") }
         r.readiness?.let {
@@ -86,6 +90,33 @@ object ReportFormatter {
             r.notes.forEach { appendLine("Примечание: $it") }
         }
     }
+}
+
+/** Отчёт по одному блоку VAG (сброс ошибок блока: «до» и «после»). */
+fun ReportFormatter.formatVagModule(
+    m: com.kostyalke.obdscanner.vag.VagModuleResult,
+    time: Long,
+    v: VehicleInfo?,
+    conn: ConnState.Connected?,
+    db: DtcDatabase,
+    kind: String,
+    extra: List<String> = emptyList(),
+): String = buildString {
+    val date = SimpleDateFormat("dd.MM.yyyy HH:mm", Locale("ru")).format(Date(time))
+    appendLine("Отчёт диагностики · $date · $kind · блок ${m.module.addressText}")
+    extra.forEach { appendLine(it) }
+    conn?.let { appendLine("Адаптер: ${it.deviceName} (${it.elmVersion}), протокол: ${it.protocol}") }
+    appendLine("VIN: ${v?.vin ?: "не прочитан"}")
+    appendLine()
+    appendLine("${m.module.addressText} ${m.module.title}" + (m.partNumber?.let { " ($it)" } ?: "") + " · ${m.protocol}" +
+        (m.tpAddress?.let { " · TP %02X".format(it) } ?: ""))
+    appendLine(when {
+        !m.responded -> "Блок не ответил"
+        m.error != null -> "${m.errorKind?.label ?: "сбой обмена"} — ${m.error}"
+        m.dtcs.isEmpty() -> "Ошибок нет"
+        else -> "Ошибок: ${m.dtcs.size}"
+    })
+    for (d in m.dtcs) appendLine("  " + vagDtcText(d, db))
 }
 
 /** Текст ошибки блока для KWP2000 и UDS. */

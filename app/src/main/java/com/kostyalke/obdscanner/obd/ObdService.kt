@@ -200,14 +200,23 @@ class ObdService(val elm: Elm327) {
         return DtcReport(System.currentTimeMillis(), stored, pending, permanent, readiness, ff, notes, rs + rp + rperm)
     }
 
-    suspend fun clearDtcs() {
+    /**
+     * Сброс (сервис 04) — ровно одна команда, без повторов. Обрыв связи и таймаут
+     * пробрасываются: вызывающий обязан считать результат неизвестным, а не повторять.
+     */
+    suspend fun clearDtcs(): ClearResult {
         val (reply, msgs) = query("04", 10000)
-        reply.error?.let { throw ObdException(it) }
-        if (msgs.any { it.data.size >= 3 && it.data[0] == 0x7F && it.data[2] == 0x22 }) {
-            throw ObdException("Блок отказал: условия не выполнены. Заглушите двигатель, зажигание оставьте включённым.")
+        val pos = msgs.forService(4)
+        val neg = msgs.filter { it.data.size >= 3 && it.data[0] == 0x7F && it.data[1] == 0x04 }
+        val why = neg.firstOrNull()?.let {
+            if (it.data[2] == 0x22) "условия не выполнены. Заглушите двигатель, зажигание оставьте включённым"
+            else "код %02X".format(it.data[2])
         }
-        if (msgs.forService(4).isEmpty()) {
-            throw ObdException("Блок не подтвердил стирание ошибок")
+        return when {
+            pos.isNotEmpty() && neg.isNotEmpty() -> ClearResult(ClearStatus.PARTIAL, "${neg.joinToString { it.ecu }}: $why")
+            neg.isNotEmpty() -> ClearResult(ClearStatus.REFUSED, why!!.replaceFirstChar { it.uppercase() })
+            pos.isNotEmpty() -> ClearResult(ClearStatus.CONFIRMED)
+            else -> ClearResult(ClearStatus.NOT_CONFIRMED, reply.error ?: if (reply.isNoData) "нет ответа" else null)
         }
     }
 
