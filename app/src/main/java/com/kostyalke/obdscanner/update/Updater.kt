@@ -12,6 +12,8 @@ import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.io.File
 import java.io.IOException
+import java.io.InputStream
+import kotlinx.coroutines.sync.Mutex
 import java.net.HttpURLConnection
 import java.net.URL
 import java.security.MessageDigest
@@ -23,7 +25,16 @@ data class ReleaseInfo(
     val sha256: String,
     val size: Long,
     val notes: String,
+    /** Неизменяемый адрес APK именно этой сборки (новые релизы); null — старый формат метаданных. */
+    val apkUrl: String? = null,
 ) {
+    /**
+     * Откуда качать. Адрес конкретной сборки не меняется, поэтому новый релиз во время
+     * загрузки не подменит файл. Принимаем только адреса релизов нашего репозитория.
+     */
+    val downloadUrl: String
+        get() = apkUrl?.takeIf { it.startsWith(Updater.RELEASES + "download/") } ?: (Updater.RELEASES + "latest/download/obd-scanner.apk")
+
     companion object {
         fun parse(json: String): ReleaseInfo {
             val o = JSONObject(json)
@@ -33,6 +44,7 @@ data class ReleaseInfo(
                 sha256 = o.getString("sha256").lowercase(),
                 size = o.optLong("size", -1),
                 notes = o.optString("notes", ""),
+                apkUrl = o.optString("apkUrl", "").ifEmpty { null },
             )
         }
     }
@@ -45,10 +57,20 @@ data class ReleaseInfo(
  * когда приложение уже ставило себя само) обновления обычно проходят без вопросов.
  */
 object Updater {
-    private const val BASE = "https://github.com/KostyaLKE/obd-scanner/releases/latest/download/"
+    const val RELEASES = "https://github.com/KostyaLKE/obd-scanner/releases/"
+    private const val BASE = RELEASES + "latest/download/"
 
     /** Результат установки от системы (через [InstallResultReceiver]). */
     val installResult = MutableStateFlow<String?>(null)
+
+    /**
+     * Идёт ли диагностика (подключение, чтение, сброс, VAG, сохранение отчёта).
+     * Задаёт экран; пока true — установка не начинается ни из приложения, ни из фоновой проверки.
+     */
+    @Volatile var isBusy: () -> Boolean = { false }
+
+    /** Одна загрузка или установка за раз. */
+    private val lock = Mutex()
 
     fun currentVersionCode(ctx: Context): Long {
         val info = ctx.packageManager.getPackageInfo(ctx.packageName, 0)
@@ -76,19 +98,30 @@ object Updater {
         }
     }
 
-    /** Скачивает APK в кэш и сверяет SHA-256 — битый или подменённый файл не ставим. */
-    suspend fun download(ctx: Context, rel: ReleaseInfo, onProgress: (Float) -> Unit): File = withContext(Dispatchers.IO) {
-        val dir = File(ctx.cacheDir, "update").apply { mkdirs() }
-        dir.listFiles()?.forEach { it.delete() }
-        val file = File(dir, "obd-scanner-${rel.versionCode}.apk")
-        val c = open(BASE + "obd-scanner.apk")
+    private fun sha256(f: File): String {
+        val md = MessageDigest.getInstance("SHA-256")
+        f.inputStream().use { inp ->
+            val buf = ByteArray(64 * 1024)
+            while (true) { val n = inp.read(buf); if (n < 0) break; md.update(buf, 0, n) }
+        }
+        return md.digest().joinToString("") { "%02x".format(it) }
+    }
+
+    /** Уже скачанный файл с верной контрольной суммой — повторно не качаем. */
+    fun isVerified(file: File, sha256: String): Boolean =
+        file.isFile && runCatching { sha256(file) == sha256.lowercase() }.getOrDefault(false)
+
+    /**
+     * Пишет поток во временный файл «.part», сверяет SHA-256 и только потом даёт файлу
+     * итоговое имя. При обрыве или несовпадении ничего не остаётся — можно повторить.
+     */
+    fun copyVerified(input: InputStream, target: File, sha256: String, total: Long, onProgress: (Float) -> Unit) {
+        val part = File(target.parentFile, target.name + ".part")
         try {
-            if (c.responseCode != 200) throw IOException("GitHub ответил ${c.responseCode}")
-            val total = c.contentLengthLong.takeIf { it > 0 } ?: rel.size
             val md = MessageDigest.getInstance("SHA-256")
             var done = 0L
-            c.inputStream.use { inp ->
-                file.outputStream().use { out ->
+            input.use { inp ->
+                part.outputStream().use { out ->
                     val buf = ByteArray(64 * 1024)
                     while (true) {
                         val n = inp.read(buf)
@@ -101,36 +134,85 @@ object Updater {
                 }
             }
             val hash = md.digest().joinToString("") { "%02x".format(it) }
-            if (hash != rel.sha256) {
-                file.delete()
-                throw IOException("Файл скачался с ошибкой (контрольная сумма не совпала). Попробуйте ещё раз.")
+            if (hash != sha256.lowercase()) {
+                throw IOException("Файл скачался с ошибкой (контрольная сумма не совпала). Попробуем ещё раз позже.")
             }
-            file
+            target.delete()
+            if (!part.renameTo(target)) throw IOException("Не удалось сохранить скачанный файл")
         } finally {
-            c.disconnect()
+            part.delete()
+        }
+    }
+
+    /** Скачивает APK конкретной сборки в кэш и сверяет SHA-256 — битый или подменённый файл не ставим. */
+    suspend fun download(ctx: Context, rel: ReleaseInfo, onProgress: (Float) -> Unit): File = withContext(Dispatchers.IO) {
+        if (!lock.tryLock()) throw IOException("Обновление уже загружается")
+        try {
+            val dir = File(ctx.cacheDir, "update").apply { mkdirs() }
+            val file = File(dir, "obd-scanner-${rel.versionCode}.apk")
+            // Старые и недокачанные файлы убираем, готовый файл этой версии оставляем.
+            dir.listFiles()?.filter { it != file }?.forEach { it.delete() }
+            if (isVerified(file, rel.sha256)) return@withContext file
+            val c = open(rel.downloadUrl)
+            try {
+                if (c.responseCode != 200) throw IOException("GitHub ответил ${c.responseCode}")
+                copyVerified(c.inputStream, file, rel.sha256, c.contentLengthLong.takeIf { it > 0 } ?: rel.size, onProgress)
+                file
+            } finally {
+                c.disconnect()
+            }
+        } finally {
+            lock.unlock()
         }
     }
 
     fun canInstall(ctx: Context): Boolean = ctx.packageManager.canRequestPackageInstalls()
 
-    /** Передаёт APK системному установщику. Приложение закроется и обновится. */
-    fun install(ctx: Context, apk: File) {
-        val installer = ctx.packageManager.packageInstaller
-        val params = PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL).apply {
-            setAppPackageName(ctx.packageName)
-            if (Build.VERSION.SDK_INT >= 31) setRequireUserAction(PackageInstaller.SessionParams.USER_ACTION_NOT_REQUIRED)
-        }
-        val id = installer.createSession(params)
-        installer.openSession(id).use { session ->
-            session.openWrite("obd-scanner.apk", 0, apk.length()).use { out ->
-                apk.inputStream().use { it.copyTo(out) }
-                session.fsync(out)
+    /**
+     * Передаёт APK системному установщику (не в главном потоке). Обновление ставится поверх:
+     * история и настройки сохраняются. Неуспешная сессия установщика освобождается.
+     */
+    suspend fun install(ctx: Context, apk: File) = withContext(Dispatchers.IO) {
+        if (isBusy()) throw IOException("Идёт диагностика — обновление установится после неё")
+        if (!lock.tryLock()) throw IOException("Обновление уже устанавливается")
+        try {
+            val installer = ctx.packageManager.packageInstaller
+            val params = PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL).apply {
+                setAppPackageName(ctx.packageName)
+                if (Build.VERSION.SDK_INT >= 31) setRequireUserAction(PackageInstaller.SessionParams.USER_ACTION_NOT_REQUIRED)
             }
-            val flags = PendingIntent.FLAG_UPDATE_CURRENT or
-                (if (Build.VERSION.SDK_INT >= 31) PendingIntent.FLAG_MUTABLE else 0)
-            val pi = PendingIntent.getBroadcast(ctx, id, Intent(ctx, InstallResultReceiver::class.java), flags)
-            session.commit(pi.intentSender)
+            val id = installer.createSession(params)
+            try {
+                installer.openSession(id).use { session ->
+                    session.openWrite("obd-scanner.apk", 0, apk.length()).use { out ->
+                        apk.inputStream().use { it.copyTo(out) }
+                        session.fsync(out)
+                    }
+                    val flags = PendingIntent.FLAG_UPDATE_CURRENT or
+                        (if (Build.VERSION.SDK_INT >= 31) PendingIntent.FLAG_MUTABLE else 0)
+                    val pi = PendingIntent.getBroadcast(ctx, id, Intent(ctx, InstallResultReceiver::class.java), flags)
+                    session.commit(pi.intentSender)
+                }
+            } catch (e: Exception) {
+                runCatching { installer.abandonSession(id) }
+                throw e
+            }
+        } finally {
+            lock.unlock()
         }
+    }
+
+    /** Понятное объяснение отказа установщика. Удалять приложение не советуем: пропадёт история. */
+    fun installError(status: Int, message: String?): String = when (status) {
+        PackageInstaller.STATUS_FAILURE_ABORTED -> "Установка отменена. Обновление останется скачанным — можно установить позже."
+        PackageInstaller.STATUS_FAILURE_BLOCKED -> "Телефон заблокировал установку (защита или политика устройства)."
+        PackageInstaller.STATUS_FAILURE_INVALID -> "Файл обновления повреждён — будет скачан заново."
+        PackageInstaller.STATUS_FAILURE_CONFLICT ->
+            "Обновление не подходит к установленной версии (подпись или номер сборки). " +
+                "Не удаляйте приложение — пропадёт история отчётов. Отправьте журнал разработчику."
+        PackageInstaller.STATUS_FAILURE_STORAGE -> "Не хватает места на телефоне для обновления."
+        PackageInstaller.STATUS_FAILURE_INCOMPATIBLE -> "Эта сборка несовместима с телефоном (версия Android или процессор)."
+        else -> "Не удалось установить обновление" + (message?.let { ": $it" } ?: "")
     }
 }
 
@@ -146,14 +228,14 @@ class InstallResultReceiver : BroadcastReceiver() {
             }
             PackageInstaller.STATUS_SUCCESS -> Updater.installResult.value = null
             else -> {
-                val msg = intent.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE)
-                Updater.installResult.value = when (status) {
-                    PackageInstaller.STATUS_FAILURE_ABORTED -> "Установка отменена"
-                    PackageInstaller.STATUS_FAILURE_CONFLICT, PackageInstaller.STATUS_FAILURE_INCOMPATIBLE ->
-                        "Не удалось обновить поверх: подпись отличается. Удалите приложение и установите заново по ссылке."
-                    PackageInstaller.STATUS_FAILURE_STORAGE -> "Не хватает места на телефоне"
-                    else -> "Не удалось установить" + (msg?.let { ": $it" } ?: "")
+                // Сессию установщика освобождаем, иначе она висит в системе.
+                val id = intent.getIntExtra(PackageInstaller.EXTRA_SESSION_ID, -1)
+                if (id >= 0) runCatching { context.packageManager.packageInstaller.abandonSession(id) }
+                if (status == PackageInstaller.STATUS_FAILURE_INVALID) {
+                    File(context.cacheDir, "update").listFiles()?.forEach { it.delete() }
                 }
+                Updater.installResult.value =
+                    Updater.installError(status, intent.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE))
             }
         }
     }

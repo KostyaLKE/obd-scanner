@@ -1,5 +1,9 @@
 package com.kostyalke.obdscanner.obd
 
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withContext
+
 /** Что ответили блоки на команду сброса. */
 enum class ClearStatus(val text: String) {
     CONFIRMED("блок подтвердил сброс"),
@@ -84,4 +88,59 @@ object ClearFlow {
         add("Вместе с ошибками сотрутся стоп-кадры и готовность самопроверок. " +
             "Если неисправность не устранена, ошибка вернётся.")
     }
+
+    /**
+     * Шаги 4–7 сброса целиком: одна команда → пауза → контрольное чтение → отчёт «после» → итог.
+     * Что бы ни случилось после отправки команды (ошибка, таймаут, отмена из-за переподключения),
+     * запись о сбросе сохраняется, а итог публикуется — в худшем случае «результат неизвестен».
+     *
+     * @param save сохраняет отчёт «после»; возвращает текст ошибки или null
+     */
+    suspend fun run(
+        beforeCodes: List<String>,
+        send: suspend () -> ClearResult,
+        settle: suspend () -> Unit,
+        read: suspend () -> AfterRead?,
+        save: suspend (ClearOutcome, AfterRead?) -> String?,
+        publish: (ClearOutcome) -> Unit,
+    ): ClearOutcome {
+        var cmd: ClearResult? = null
+        var finished = false
+        suspend fun finish(c: ClearResult, after: AfterRead?): ClearOutcome {
+            val check = after?.check ?: ControlRead(false, 0, problem = "прочитать не удалось")
+            val base = evaluate(c, check, after?.codes?.let { compare(beforeCodes, it) })
+            val err = try { save(base, after) } catch (e: CancellationException) { throw e } catch (e: Exception) { e.message ?: "ошибка записи" }
+            val shown = if (err == null) base else base.copy(details = base.details + "Отчёт после сброса НЕ сохранён: $err")
+            finished = true
+            publish(shown)
+            return shown
+        }
+        try {
+            cmd = try {
+                send()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                ClearResult(ClearStatus.UNKNOWN, e.message ?: e.javaClass.simpleName)
+            }
+            settle()
+            val after = try {
+                read()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                AfterRead(ControlRead(false, 0, problem = e.message ?: e.javaClass.simpleName), null, "")
+            }
+            return finish(cmd, after)
+        } finally {
+            // Операцию прервали после отправки команды: фиксируем это, а не теряем молча.
+            if (!finished) withContext(NonCancellable) {
+                val c = cmd ?: ClearResult(ClearStatus.UNKNOWN, "операция прервана во время команды")
+                finish(c, AfterRead(ControlRead(false, 0, problem = "операция прервана (обрыв связи или отмена)"), null, ""))
+            }
+        }
+    }
 }
+
+/** Контрольное чтение после сброса: итог, коды (null — не прочитаны) и текст отчёта. */
+data class AfterRead(val check: ControlRead, val codes: List<String>?, val body: String, val meta: Any? = null)

@@ -21,6 +21,7 @@ import com.kostyalke.obdscanner.elm.LogLine
 import com.kostyalke.obdscanner.elm.ObdTransport
 import com.kostyalke.obdscanner.obd.DtcDatabase
 import com.kostyalke.obdscanner.obd.DtcReport
+import com.kostyalke.obdscanner.obd.AfterRead
 import com.kostyalke.obdscanner.obd.ClearFlow
 import com.kostyalke.obdscanner.obd.ClearOutcome
 import com.kostyalke.obdscanner.obd.ClearResult
@@ -39,6 +40,7 @@ import com.kostyalke.obdscanner.vag.VagModule
 import com.kostyalke.obdscanner.vag.VagModuleResult
 import com.kostyalke.obdscanner.vag.VagModules
 import com.kostyalke.obdscanner.update.ReleaseInfo
+import com.kostyalke.obdscanner.update.UpdateJobService
 import com.kostyalke.obdscanner.update.Updater
 import java.io.File
 import com.kostyalke.obdscanner.elm.catching
@@ -226,6 +228,12 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             val op = this
             try {
                 busLock.withLock { op.block() }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // Страховка: ни одна операция не должна уронить приложение необработанной ошибкой.
+                log("Ошибка операции: ${humanError(e)}")
+                _dtc.update { it.copy(warning = "Операция не выполнена: ${humanError(e)}") }
             } finally {
                 // ELM не вернулся к OBD — переинициализация и при ошибке операции,
                 // но только если это всё ещё то же подключение.
@@ -254,11 +262,20 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     var autoUpdate: Boolean
         get() = prefs.getBoolean("autoUpdate", true)
-        set(v) = prefs.edit().putBoolean("autoUpdate", v).apply()
+        set(v) {
+            prefs.edit().putBoolean("autoUpdate", v).apply()
+            UpdateJobService.schedule(getApplication(), v)
+        }
 
     val versionName: String = runCatching { Updater.currentVersionName(app) }.getOrDefault("?")
 
+    /** Идёт подключение, связь с машиной или операция — обновление в это время не ставится. */
+    private fun diagnosticsActive(): Boolean =
+        _conn.value is ConnState.Connected || _conn.value is ConnState.Connecting || opLock.isLocked
+
     init {
+        Updater.isBusy = ::diagnosticsActive
+        UpdateJobService.schedule(app, autoUpdate)
         refreshReports()
         checkForUpdate(manual = false)
         viewModelScope.launch {
@@ -275,6 +292,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     fun checkForUpdate(manual: Boolean) {
         val st = _update.value
         if (st is UpdateState.Checking || st is UpdateState.Downloading || st is UpdateState.Installing) return
+        // Автопроверка — не чаще раза в час: без интернета не долбим сеть при каждом запуске.
+        val now = System.currentTimeMillis()
+        if (!manual && now - prefs.getLong("lastUpdateCheck", 0) < 60 * 60 * 1000L && st !is UpdateState.Ready) return
+        prefs.edit().putLong("lastUpdateCheck", now).apply()
         viewModelScope.launch {
             if (manual) _update.value = UpdateState.Checking
             try {
@@ -325,12 +346,19 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         val ctx = getApplication<Application>()
         when {
             !Updater.canInstall(ctx) -> _update.value = UpdateState.Ready(rel, needPermission = true)
-            _conn.value is ConnState.Connected || _conn.value is ConnState.Connecting ->
-                _update.value = UpdateState.Ready(rel, needPermission = false)
+            // Диагностику ради обновления не обрываем: поставим после отключения.
+            diagnosticsActive() -> _update.value = UpdateState.Ready(rel, needPermission = false)
             else -> {
                 _update.value = UpdateState.Installing(rel)
-                runCatching { Updater.install(ctx, file) }
-                    .onFailure { _update.value = UpdateState.Failed("Не удалось запустить установку: ${it.message}") }
+                viewModelScope.launch {
+                    try {
+                        Updater.install(ctx, file)
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        _update.value = UpdateState.Failed("Не удалось запустить установку: ${e.message}")
+                    }
+                }
             }
         }
     }
@@ -338,7 +366,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     /** Кнопка «Установить» в баннере — человек сам решил, даже если машина подключена. */
     fun installNow() {
         val st = _update.value as? UpdateState.Ready ?: return
-        if (_conn.value is ConnState.Connected) disconnect()
+        // Идёт чтение, сброс или опрос блоков — не прерываем, даже по кнопке.
+        if (opLock.isLocked) return
+        if (_conn.value is ConnState.Connected || _conn.value is ConnState.Connecting) disconnect()
         tryInstall(st.rel)
     }
 
@@ -509,6 +539,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         pauseLive()
         closeTransport()
         _conn.value = ConnState.Disconnected
+        // Диагностика закончена — ставим скачанное обновление, если оно ждало.
+        (_update.value as? UpdateState.Ready)?.takeIf { autoUpdate && !it.needPermission }?.let { tryInstall(it.rel) }
     }
 
     private fun closeTransport() {
@@ -952,53 +984,50 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             _dtc.update { it.copy(clearing = true, error = null, message = null, warning = null, outcome = null) }
             if (m != null) _vag.update { it.copy(clearing = m.address, error = null) }
             try {
-                val cmd = if (m == null) {
-                    try {
-                        withService { it.clearDtcs() } ?: ClearResult(ClearStatus.UNKNOWN, "связь с адаптером прервалась")
-                    } catch (e: CancellationException) {
-                        throw e
-                    } catch (e: Exception) {
-                        ClearResult(ClearStatus.UNKNOWN, humanError(e))
-                    }
-                } else clearVagModule(m)
-                log("Сброс: ${cmd.text}")
-                delay(1500)
-                val now = System.currentTimeMillis()
-                val check: ControlRead
-                val body: String
-                var afterCodes: List<String>? = null
-                var afterMeta = ReportMeta("после сброса", complete = false, linkedTo = prep.beforeName)
-                val sameLink = session == prep.session
-                if (m == null) {
-                    val r = if (sameLink) doReadDtcs(save = false) else null
-                    check = r?.let {
-                        ControlRead(it.isComplete, it.stored.size + it.pending.size, it.permanent.size,
-                            it.failed.joinToString("; ") { f -> f.text }.ifEmpty { null })
-                    } ?: ControlRead(false, 0, problem = _dtc.value.error ?: "связь потеряна")
-                    body = r?.let { reportText(it, "после сброса") } ?: ""
-                    afterCodes = r?.let { obdCodes(it) }
-                    r?.let { afterMeta = metaOf(it, "после сброса", prep.beforeName) }
-                } else {
-                    val fresh = if (sameLink) readVagModule(m) else null
-                    check = fresh?.let { ControlRead(it.responded && it.error == null, it.dtcs.size, problem = it.error) }
-                        ?: ControlRead(false, 0, problem = "блок не ответил")
-                    body = fresh?.let { vagReportText(it, now, "после сброса") } ?: ""
-                    afterCodes = fresh?.let { vagCodes(it) }
-                    fresh?.let { afterMeta = metaOf(it, "после сброса · блок ${m.addressText}", prep.beforeName) }
-                }
-                val outcome = ClearFlow.evaluate(cmd, check, afterCodes?.let { ClearFlow.compare(prep.beforeCodes, it) })
-                val link = "Связан с отчётом до сброса: " + (prep.beforeName ?: "не сохранён")
-                val head = listOf(link, "Итог сброса: ${outcome.title}") + outcome.details
-                val text = body.ifEmpty {
-                    "Отчёт диагностики · " + java.text.SimpleDateFormat("dd.MM.yyyy HH:mm", java.util.Locale("ru"))
-                        .format(java.util.Date(now)) + " · после сброса\n"
-                }.let { b -> b.substringBefore("\n") + "\n" + head.joinToString("\n") + "\n" + b.substringAfter("\n", "") }
-                // Неподтверждённый или непроверенный сброс — отчёт помечается неполным.
-                if (outcome.kind != OutcomeKind.CLEARED && outcome.kind != OutcomeKind.REMAINING) afterMeta = afterMeta.copy(complete = false)
-                val (_, saveError) = saveReport(text, now, afterMeta)
-                val shown = if (saveError == null) outcome
-                else outcome.copy(details = outcome.details + "Отчёт после сброса НЕ сохранён: $saveError")
-                _dtc.update { it.copy(outcome = shown) }
+                // Весь ход — в ClearFlow.run: он сохраняет запись и публикует итог даже при
+                // обрыве связи (переподключение отменяет эту операцию) и при любой ошибке.
+                ClearFlow.run(
+                    beforeCodes = prep.beforeCodes,
+                    send = {
+                        val cmd = if (m == null) {
+                            withService { it.clearDtcs() } ?: ClearResult(ClearStatus.UNKNOWN, "связь с адаптером прервалась")
+                        } else clearVagModule(m)
+                        log("Сброс: ${cmd.text}")
+                        cmd
+                    },
+                    settle = { delay(1500) },
+                    read = {
+                        if (session != prep.session) null
+                        else if (m == null) doReadDtcs(save = false)?.let { r ->
+                            AfterRead(
+                                ControlRead(r.isComplete, r.stored.size + r.pending.size, r.permanent.size,
+                                    r.failed.joinToString("; ") { f -> f.text }.ifEmpty { null }),
+                                obdCodes(r), reportText(r, "после сброса"), metaOf(r, "после сброса", prep.beforeName),
+                            )
+                        } ?: AfterRead(ControlRead(false, 0, problem = _dtc.value.error ?: "связь потеряна"), null, "")
+                        else readVagModule(m)?.let { f ->
+                            AfterRead(ControlRead(f.responded && f.error == null, f.dtcs.size, problem = f.error),
+                                vagCodes(f), vagReportText(f, System.currentTimeMillis(), "после сброса"),
+                                metaOf(f, "после сброса · блок ${m.addressText}", prep.beforeName))
+                        } ?: AfterRead(ControlRead(false, 0, problem = "блок не ответил"), null, "")
+                    },
+                    save = { outcome, after ->
+                        val now = System.currentTimeMillis()
+                        val kind = "после сброса" + (m?.let { " · блок ${it.addressText}" } ?: "")
+                        val head = listOf("Связан с отчётом до сброса: " + (prep.beforeName ?: "не сохранён"),
+                            "Итог сброса: ${outcome.title}") + outcome.details
+                        val body = after?.body.orEmpty().ifEmpty {
+                            "Отчёт диагностики · " + java.text.SimpleDateFormat("dd.MM.yyyy HH:mm", java.util.Locale("ru"))
+                                .format(java.util.Date(now)) + " · $kind\n" + demoNote().joinToString("") { "$it\n" }
+                        }
+                        val text = body.substringBefore("\n") + "\n" + head.joinToString("\n") + "\n" + body.substringAfter("\n", "")
+                        var meta = (after?.meta as? ReportMeta) ?: ReportMeta(kind, complete = false, linkedTo = prep.beforeName)
+                        // Неподтверждённый или непроверенный сброс — отчёт помечается неполным.
+                        if (outcome.kind != OutcomeKind.CLEARED && outcome.kind != OutcomeKind.REMAINING) meta = meta.copy(complete = false)
+                        saveReport(text, now, meta).second
+                    },
+                    publish = { o -> _dtc.update { it.copy(outcome = o) } },
+                )
             } finally {
                 _dtc.update { it.copy(clearing = false) }
                 if (m != null) _vag.update { it.copy(clearing = null) }
@@ -1181,6 +1210,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     override fun onCleared() {
+        Updater.isBusy = { false }
         disconnect()
         super.onCleared()
     }

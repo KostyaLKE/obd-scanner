@@ -214,7 +214,7 @@ class ObdService(val elm: Elm327) {
             return ClearResult(ClearStatus.NOT_CONFIRMED, "адаптер не принял адрес двигателя — команда не отправлена")
         }
         try {
-            return clearReply()
+            return clearReply(if (engineOnly) "7E8" else null)
         } finally {
             if (engineOnly) withContext(NonCancellable) { catching { elm.send("ATSH7DF", 2000) } }
         }
@@ -223,9 +223,15 @@ class ObdService(val elm: Elm327) {
     /** true — сброс уйдёт всем блокам OBD (K-line, CAN 29 бит), а не только двигателю. */
     val clearIsBroadcast: Boolean get() = !(protocol.isCan && !protocol.is29bit)
 
-    private suspend fun clearReply(): ClearResult {
-        val (reply, msgs) = query("04", 10000)
-        val pos = msgs.forService(4)
+    /**
+     * @param from CAN-ID, от которого ждём ответ (двигатель), или null при общем запросе.
+     * Подтверждением считается только полное сообщение «44» от нужного блока.
+     */
+    private suspend fun clearReply(from: String?): ClearResult {
+        val (reply, all) = query("04", 10000)
+        val msgs = all.filter { from == null || it.header == from }
+        if (msgs.any { it.incomplete }) return ClearResult(ClearStatus.NOT_CONFIRMED, "ответ блока повреждён или неполный")
+        val pos = msgs.filter { it.data.size == 1 && it.data[0] == 0x44 }
         val neg = msgs.filter { it.data.size >= 3 && it.data[0] == 0x7F && it.data[1] == 0x04 }
         val why = neg.firstOrNull()?.let {
             if (it.data[2] == 0x22) "условия не выполнены. Заглушите двигатель, зажигание оставьте включённым"

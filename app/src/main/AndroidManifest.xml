@@ -38,5 +38,10 @@
         <receiver
             android:name=".update.InstallResultReceiver"
             android:exported="false" />
+        <!-- Фоновая проверка обновлений (JobScheduler) -->
+        <service
+            android:name=".update.UpdateJobService"
+            android:exported="false"
+            android:permission="android.permission.BIND_JOB_SERVICE" />
     </application>
 </manifest>
