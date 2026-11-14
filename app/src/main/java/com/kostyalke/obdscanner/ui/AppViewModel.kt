@@ -556,7 +556,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             try {
                 withService { s ->
                     s.elm.exclusive { send ->
-                        val scan = com.kostyalke.obdscanner.vag.VagScanner.scanAll(send, s.elm.protocol.code, ::log) { title, p ->
+                        val scan = com.kostyalke.obdscanner.vag.VagScanner.scanAll(
+                            send, s.elm.protocol.code, ::log, onRestoreFailed = { adapterDirty = true },
+                        ) { title, p ->
                             _vag.update { it.copy(current = title, progress = p) }
                         }
                         _vag.update { it.copy(results = scan.results) }

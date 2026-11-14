@@ -103,15 +103,25 @@ class Uds(private val send: suspend (String, Long) -> ElmReply) {
         return r.copyOfRange(3, r.size)
     }
 
-    /** Текст из DID (номер детали F187, название системы F197 и т.п.). */
-    suspend fun readText(did: Int): String? = catching {
-        readDid(did)?.takeWhile { it in 0x20..0x7E }?.map { it.toChar() }?.joinToString("")?.trim()?.ifEmpty { null }
-    }.getOrNull()
+    /**
+     * Необязательный DID: нет ответа, отказ или чужой/повреждённый ответ — null.
+     * Обрыв связи и таймаут адаптера не прячем: это не «нет номера детали».
+     */
+    private suspend fun optionalDid(did: Int): IntArray? = try {
+        readDid(did)
+    } catch (e: VagException) {
+        null
+    }
 
-    suspend fun readRaw(did: Int): IntArray? = catching { readDid(did) }.getOrNull()
+    /** Текст из DID (номер детали F187, название системы F197 и т.п.). */
+    suspend fun readText(did: Int): String? =
+        optionalDid(did)?.takeWhile { it in 0x20..0x7E }?.map { it.toChar() }?.joinToString("")?.trim()?.ifEmpty { null }
+
+    suspend fun readRaw(did: Int): IntArray? = optionalDid(did)
 
     suspend fun clearDtcs() {
-        catching { request(0x10, 0x03) } // расширенная сессия; часть блоков сбрасывает и без неё
+        // Расширенная сессия; часть блоков сбрасывает и без неё. Обрыв связи — наверх.
+        try { request(0x10, 0x03) } catch (e: VagException) { }
         request(0x14, 0xFF, 0xFF, 0xFF, retryPending = false) ?: throw VagException("Блок не ответил на сброс")
     }
 

@@ -123,4 +123,23 @@ class UdsTest {
         assertEquals(com.kostyalke.obdscanner.vag.VagErrorKind.ADAPTER, kind("CAN ERROR"))
         assertEquals(com.kostyalke.obdscanner.vag.VagErrorKind.LINK, kind("77E 10 0B 59 02 FF 01 23 45"))
     }
+
+    @Test
+    fun connectionLossWhileReadingIdentIsNotHidden() {
+        val u = uds(Fake(emptyMap()))
+        val broken = Uds { cmd, _ ->
+            if (cmd.startsWith("AT")) ElmReply(cmd, "OK", listOf("OK")) else throw java.io.IOException("обрыв")
+        }
+        runBlocking { broken.target(0x714, 0x77E) }
+        try {
+            runBlocking { broken.readText(0xF187) }
+            fail("обрыв связи выдан за отсутствующий номер детали")
+        } catch (e: java.io.IOException) { /* ожидаемо */ }
+        try {
+            runBlocking { broken.readRaw(0x0600) }
+            fail("обрыв связи выдан за отсутствующую запись")
+        } catch (e: java.io.IOException) { /* ожидаемо */ }
+        // А отсутствие необязательного DID — по-прежнему просто null.
+        assertNull(runBlocking { u.readText(0xF187) })
+    }
 }

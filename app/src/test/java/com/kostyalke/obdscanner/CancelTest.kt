@@ -76,4 +76,19 @@ class CancelTest {
         assertTrue(ok.adapterRestored)
         assertEquals(ok.results.size, r.results.size)
     }
+
+    @Test
+    fun failedRestoreIsReportedEvenWhenScanThrows() = runBlocking {
+        // Адаптер «завис» при открытии блока, а затем не принял ATCAF1 при возврате к OBD.
+        var restoreFailed = false
+        val send: suspend (String, Long) -> ElmReply = { cmd, _ ->
+            if (cmd == "01C000100003011") throw com.kostyalke.obdscanner.elm.ElmTimeoutException("")
+            reply(cmd, if (cmd.startsWith("AT")) listOf(if (cmd == "ATCAF1") "?" else "OK") else emptyList())
+        }
+        try {
+            VagScanner.scanAll(send, '6', {}, onRestoreFailed = { restoreFailed = true }) { _, _ -> }
+            fail("таймаут проглочен")
+        } catch (e: com.kostyalke.obdscanner.elm.ElmTimeoutException) { /* ожидаемо */ }
+        assertTrue("неудачный возврат настроек потерян", restoreFailed)
+    }
 }

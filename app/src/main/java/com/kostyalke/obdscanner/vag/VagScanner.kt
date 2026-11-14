@@ -15,6 +15,8 @@ object VagScanner {
         send: suspend (String, Long) -> ElmReply,
         obdProtocol: Char,
         log: (String) -> Unit,
+        /** Вызывается, если ELM не вернулся к OBD, — даже когда опрос завершился исключением. */
+        onRestoreFailed: () -> Unit = {},
         progress: (String, Float) -> Unit,
     ): VagScan {
         var restored = true
@@ -44,6 +46,7 @@ object VagScanner {
             log("VAG: TP2.0 недоступен: ${e.message}")
         } finally {
             restored = tp.restore()
+            if (!restored) onRestoreFailed()
         }
 
         // Все блоки из списка + найденные сверх него (только ответившие).
@@ -68,7 +71,10 @@ object VagScanner {
                     }
                 }
             } finally {
-                restored = uds.restore() && restored
+                if (!uds.restore()) {
+                    restored = false
+                    onRestoreFailed()
+                }
             }
         }
         return VagScan(merged, restored)

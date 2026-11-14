@@ -231,13 +231,16 @@ class Tp20(
         if (r.firstOrNull() != 0x50) throw VagException("Блок не открыл диагностическую сессию")
     }
 
-    suspend fun partNumber(): String? = catching {
+    /** Номер детали; отказ/сбой протокола — null, обрыв связи — наверх. */
+    suspend fun partNumber(): String? = try {
         val r = request(0x1A, 0x9B)
         if (r.size < 3 || r[0] != 0x5A) null
         // «6R0907379AL  ESP MK60EC1» → «6R0907379AL · ESP MK60EC1»
         else r.drop(2).takeWhile { it in 0x20..0x7E }.map { it.toChar() }.joinToString("")
             .trim().split(Regex("\\s{2,}")).filter { it.isNotBlank() }.joinToString(" · ").take(48).ifEmpty { null }
-    }.getOrNull()
+    } catch (e: VagException) {
+        null
+    }
 
     suspend fun readDtcs(): List<VagDtc> {
         val r = request(0x18, 0x02, 0xFF, 0x00)
@@ -332,7 +335,8 @@ class Tp20(
 
         /** Таблица «адрес VCDS → адрес TP2.0» от шлюза (0x1F). null — шлюз не ответил. */
         suspend fun gatewayMap(tp: Tp20): Map<Int, Int>? {
-            if (!catching { tp.open(0x1F) }.getOrDefault(false)) return null
+            val opened = try { tp.open(0x1F) } catch (e: VagException) { false }
+            if (!opened) return null
             return try {
                 tp.startSession()
                 tp.readGatewayMap().ifEmpty { null }
