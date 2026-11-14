@@ -96,6 +96,39 @@ class ScreenShots {
             emptyList(), db::info, {}, {}, {})
     })
 
+    @Test fun checkRunning() = shot("02e_check_running", true, shell(Tab.ERRORS) {
+        ErrorsContent(DtcState(report = report), emptyList(), db::info, {}, {}, {}, vagSupported = true,
+            vag = com.kostyalke.obdscanner.ui.VagState(scanning = true, current = "Подушки безопасности (TP2.0)", progress = 0.4f),
+            check = com.kostyalke.obdscanner.ui.CheckState(running = true, stage = "Блоки автомобиля", blocksDone = 3),
+            carLine = "VIN TMBEG25J5C3057412 · ECM-EngineControl")
+    })
+
+    @Test fun checkDone() = shot("02f_check_done", false, shell(Tab.ERRORS, 0) {
+        val V = com.kostyalke.obdscanner.vag.VagModules
+        fun m(a: Int) = V.scanList.first { it.address == a }
+        ErrorsContent(DtcState(report = report.copy(stored = emptyList(), pending = emptyList(),
+            readiness = readiness.copy(milOn = false, dtcCount = 0), freezeFrame = null, notes = emptyList())),
+            emptyList(), db::info, {}, {}, {}, vagSupported = true,
+            vag = com.kostyalke.obdscanner.ui.VagState(time = 1_759_603_440_000, results = listOf(
+                com.kostyalke.obdscanner.vag.VagModuleResult(m(0x03), "6R0907379AL · ESP MK60EC1", emptyList(), true),
+                com.kostyalke.obdscanner.vag.VagModuleResult(m(0x15), null, emptyList(), true, error = "Блок ответил отказом (код 0x22)",
+                    errorKind = com.kostyalke.obdscanner.vag.VagErrorKind.REFUSED),
+                com.kostyalke.obdscanner.vag.VagModuleResult(m(0x08), null, emptyList(), false))),
+            check = com.kostyalke.obdscanner.ui.CheckState(time = 1_759_603_440_000),
+            carLine = "VIN TMBEG25J5C3057412")
+    })
+
+    @Test fun reports() = shot("06_reports", true, shell(Tab.REPORTS, 0) {
+        val f = java.io.File("x")
+        fun r(id: String, title: String, meta: com.kostyalke.obdscanner.data.ReportMeta) =
+            com.kostyalke.obdscanner.data.SavedReport(f, title, "Отчёт диагностики · $title\nP0401", id, meta)
+        com.kostyalke.obdscanner.ui.HistoryContent(listOf(
+            r("b", "04.10.2026 21:46 · после сброса", com.kostyalke.obdscanner.data.ReportMeta("после сброса", "TMBEG25J5C3057412", 0, false, linkedTo = "a")),
+            r("a", "04.10.2026 21:44 · до сброса", com.kostyalke.obdscanner.data.ReportMeta("до сброса", "TMBEG25J5C3057412", 2, true, note = "заменил клапан EGR")),
+            r("c", "01.10.2026 09:10 · проверка автомобиля", com.kostyalke.obdscanner.data.ReportMeta("проверка автомобиля", null, 0, true, demo = true)),
+        ), {}, {})
+    })
+
     @Test fun errorsNone() = shot("02_errors_none", true, shell(Tab.ERRORS, 0) {
         ErrorsContent(DtcState(report = report.copy(stored = emptyList(), pending = emptyList(),
             readiness = readiness.copy(milOn = false, dtcCount = 0), freezeFrame = null, notes = emptyList())),
@@ -116,7 +149,7 @@ class ScreenShots {
         shot("03_live", dark, shell(Tab.LIVE) { LiveContent(st, {}, {}, {}) })
     }
 
-    @Test fun readiness() = shot("04_readiness", true, shell(Tab.READY) {
+    @Test fun readiness() = shot("04_readiness", true, shell(Tab.ERRORS) {
         ReadinessContent(readiness, listOf(Pids.byId[0x31]!! to 800.0, Pids.byId[0x4E]!! to 1260.0, Pids.byId[0x30]!! to 14.0),
             false) {}
     })

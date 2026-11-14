@@ -30,6 +30,7 @@ import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -49,7 +50,13 @@ fun LiveContent(
     onToggleFavorite: (Int) -> Unit,
     onOnlyFavorites: (Boolean) -> Unit,
     onResetMinMax: () -> Unit,
+    /** Опрос остановлен на время другой операции (проверка, сброс). */
+    paused: Boolean = false,
 ) {
+    // «Сейчас» тикает раз в секунду, чтобы плитка сама показала, что значение устарело.
+    val now by androidx.compose.runtime.produceState(System.currentTimeMillis()) {
+        while (true) { kotlinx.coroutines.delay(1000); value = System.currentTimeMillis() }
+    }
     val shown = if (st.onlyFavorites && st.favorites.isNotEmpty()) st.supported.filter { it.pid in st.favorites } else st.supported
 
     Column(Modifier.fillMaxSize()) {
@@ -73,6 +80,7 @@ fun LiveContent(
         }
         Text(
             when {
+                paused -> "Опрос остановлен: идёт проверка автомобиля. Значения не обновляются."
                 st.loading -> "Узнаю, какие параметры отдаёт блок…"
                 st.cycleMs > 0 -> "Обновление раз в ${"%.1f".format(Ru, st.cycleMs / 1000.0)} с"
                 else -> "Опрос…"
@@ -111,14 +119,19 @@ fun LiveContent(
                 }
             }
             items(shown, key = { it.pid }) { def ->
-                LiveTile(def, st.values[def.pid], def.pid in st.favorites) { onToggleFavorite(def.pid) }
+                LiveTile(def, st.values[def.pid], def.pid in st.favorites, now) { onToggleFavorite(def.pid) }
             }
         }
     }
 }
 
+private const val STALE_AFTER_S = 5
+
 @Composable
-private fun LiveTile(def: PidDef, v: LiveValue?, fav: Boolean, onFav: () -> Unit) {
+private fun LiveTile(def: PidDef, v: LiveValue?, fav: Boolean, now: Long, onFav: () -> Unit) {
+    // Значение старше 5 с — уже не «текущее»: показываем возраст, а не выдаём за свежее.
+    val age = v?.let { (now - it.time) / 1000 } ?: 0
+    val old = v != null && age >= STALE_AFTER_S
     Surface(shape = PanelShape, color = MaterialTheme.colorScheme.surfaceContainer) {
         Column(Modifier.padding(start = 14.dp, bottom = 14.dp)) {
             Row(verticalAlignment = Alignment.Top) {
@@ -145,7 +158,7 @@ private fun LiveTile(def: PidDef, v: LiveValue?, fav: Boolean, onFav: () -> Unit
                     v?.let { Pids.format(def, it.value) } ?: "—",
                     style = MaterialTheme.typography.headlineSmall.merge(Tabular),
                     fontWeight = FontWeight.SemiBold,
-                    color = MaterialTheme.colorScheme.onSurface,
+                    color = if (old) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurface,
                     maxLines = 1,
                     softWrap = false,
                 )
@@ -158,9 +171,13 @@ private fun LiveTile(def: PidDef, v: LiveValue?, fav: Boolean, onFav: () -> Unit
             }
             // Диапазон за сеанс: «1472 – 2208» короче, чем «мин … · макс …», и не переносится.
             Text(
-                if (v != null) "${Pids.format(def, v.min)} – ${Pids.format(def, v.max)}" else " ",
+                when {
+                    v == null -> "нет ответа" // это не ноль: блок значение не прислал
+                    old -> "устарело: $age с назад"
+                    else -> "${Pids.format(def, v.min)} – ${Pids.format(def, v.max)}"
+                },
                 style = MaterialTheme.typography.labelSmall.merge(Tabular),
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                color = if (old) Status.colors.warning.accent else MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )

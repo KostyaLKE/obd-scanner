@@ -1,5 +1,12 @@
 package com.kostyalke.obdscanner.ui
 
+import androidx.compose.material.icons.filled.Info
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.AlertDialog
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -238,43 +245,132 @@ fun LogContent(log: List<LogLine>, busy: Boolean, onSend: (String) -> Unit, onSh
 
 // ---------------- История ----------------
 
+/**
+ * Отчёты: дата, автомобиль, число ошибок, полнота; пары «до/после сброса» рядом;
+ * заметка владельца; явная настройка хранения (по умолчанию ничего не удаляется).
+ */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
-fun HistoryContent(reports: List<SavedReport>, onShare: (SavedReport) -> Unit, onDelete: (SavedReport) -> Unit) {
+fun HistoryContent(
+    reports: List<SavedReport>,
+    onShare: (SavedReport) -> Unit,
+    onDelete: (SavedReport) -> Unit,
+    onNote: (SavedReport, String) -> Unit = { _, _ -> },
+    keep: Int = 0,
+    onKeep: (Int) -> Unit = {},
+) {
     var open by remember { mutableStateOf<String?>(null) }
+    var noteFor by remember { mutableStateOf<SavedReport?>(null) }
+    var confirmDelete by remember { mutableStateOf<SavedReport?>(null) }
+    var keepMenu by remember { mutableStateOf(false) }
+    // Отчёт «после сброса» показываем одной карточкой с его отчётом «до».
+    val byId = remember(reports) { reports.associateBy { it.id } }
+    val pairedBefore = remember(reports) { reports.mapNotNull { r -> r.meta.linkedTo?.takeIf { it in byId } }.toSet() }
+    val groups = remember(reports) {
+        reports.filter { it.id !in pairedBefore }.map { r -> listOfNotNull(r, r.meta.linkedTo?.let { byId[it] }) }
+    }
     LazyColumn(Modifier.fillMaxSize(), contentPadding = ScreenPadding, verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        item {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("Хранить: " + if (keep <= 0) "все отчёты" else "последние $keep",
+                    style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.weight(1f).padding(start = 4.dp))
+                Box {
+                    TextButton(onClick = { keepMenu = true }) { Text("Изменить") }
+                    DropdownMenu(expanded = keepMenu, onDismissRequest = { keepMenu = false }) {
+                        for (n in listOf(0, 100, 300)) DropdownMenuItem(
+                            text = { Text(if (n == 0) "Все отчёты (ничего не удалять)" else "Только последние $n") },
+                            onClick = { keepMenu = false; onKeep(n) },
+                        )
+                    }
+                }
+            }
+        }
         if (reports.isEmpty()) item {
             StatusNote("Отчётов пока нет", Status.colors.neutral, AppIcons.History,
-                "Каждое чтение ошибок сохраняется сюда автоматически.")
+                "Каждая проверка автомобиля и каждый сброс ошибок сохраняются сюда автоматически.")
         }
-        items(reports, key = { it.file.name }) { r ->
-            val codes = remember(r.text) {
-                Regex("\\b[PCBU][0-9A-F]{4}\\b").findAll(r.text).map { it.value }.distinct().toList()
-            }
+        items(groups, key = { it.first().id }) { group ->
             Panel {
-                Column(Modifier.padding(start = 16.dp, top = 14.dp, end = 16.dp)) {
-                    Text(r.title, style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurface)
-                    Spacer(Modifier.size(6.dp))
-                    if (codes.isEmpty()) StatusPill("ошибок не было", Status.colors.ok, Icons.Filled.CheckCircle)
-                    else Text(codes.joinToString("  "), style = MaterialTheme.typography.bodyMedium,
-                        fontFamily = FontFamily.Monospace, color = Status.colors.error.accent, fontWeight = FontWeight.SemiBold)
-                    if (open == r.file.name) {
-                        Spacer(Modifier.size(10.dp))
-                        SelectionContainer {
-                            Text(r.text, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                if (group.size > 1) Text("Сброс ошибок: до и после", style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(start = 16.dp, top = 12.dp, end = 16.dp))
+                group.forEachIndexed { gi, r ->
+                    if (gi > 0) PanelDivider()
+                    val codes = remember(r.text) {
+                        Regex("\\b[PCBU][0-9A-F]{4}\\b").findAll(r.text).map { it.value }.distinct().toList()
+                    }
+                    Column(Modifier.padding(start = 16.dp, top = 14.dp, end = 16.dp)) {
+                        Text(r.title, style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurface)
+                        r.meta.vin?.let {
+                            Text("VIN $it", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        Spacer(Modifier.size(6.dp))
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            val n = r.meta.errors ?: codes.size
+                            when {
+                                r.broken -> StatusPill("файл повреждён", Status.colors.warning, Icons.Filled.Warning)
+                                n == 0 -> StatusPill("ошибок не найдено", Status.colors.ok, Icons.Filled.CheckCircle)
+                                else -> StatusPill("ошибок: $n", Status.colors.error, AppIcons.Error)
+                            }
+                            when (r.meta.complete) {
+                                false -> StatusPill("проверка неполная", Status.colors.warning, Icons.Filled.Warning)
+                                true -> StatusPill("проверка полная", Status.colors.neutral, Icons.Filled.CheckCircle)
+                                null -> {}
+                            }
+                            if (r.meta.demo) StatusPill("ДЕМО", Status.colors.warning, Icons.Filled.Info)
+                        }
+                        // Коды показываем только там, где ошибки есть: в отчёте «после сброса»
+                        // текст упоминает исчезнувшие коды — их нельзя выдавать за найденные.
+                        if (codes.isNotEmpty() && (r.meta.errors ?: codes.size) > 0) Text(codes.joinToString("  "), style = MaterialTheme.typography.bodyMedium,
+                            fontFamily = FontFamily.Monospace, color = Status.colors.error.accent, fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.padding(top = 6.dp))
+                        r.meta.note?.let {
+                            Text("Заметка: $it", style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurface, modifier = Modifier.padding(top = 6.dp))
+                        }
+                        if (open == r.id) {
+                            Spacer(Modifier.size(10.dp))
+                            SelectionContainer {
+                                Text(r.text, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
                         }
                     }
-                }
-                Row(Modifier.padding(horizontal = 4.dp)) {
-                    TextButton(onClick = { open = if (open == r.file.name) null else r.file.name }) {
-                        Text(if (open == r.file.name) "Свернуть" else "Открыть")
-                    }
-                    TextButton(onClick = { onShare(r) }) { Text("Поделиться") }
-                    Spacer(Modifier.weight(1f))
-                    IconButton(onClick = { onDelete(r) }) {
-                        Icon(Icons.Filled.Delete, "Удалить отчёт", tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                    FlowRow(Modifier.padding(horizontal = 4.dp)) {
+                        TextButton(onClick = { open = if (open == r.id) null else r.id }) {
+                            Text(if (open == r.id) "Свернуть" else "Открыть")
+                        }
+                        if (!r.broken) {
+                            TextButton(onClick = { onShare(r) }) { Text("Отправить") }
+                            TextButton(onClick = { noteFor = r }) { Text(if (r.meta.note == null) "Заметка" else "Изменить заметку") }
+                        }
+                        TextButton(onClick = { confirmDelete = r }) { Text("Удалить", color = Status.colors.error.accent) }
                     }
                 }
             }
         }
+    }
+    noteFor?.let { r ->
+        var text by remember(r.id) { mutableStateOf(r.meta.note ?: "") }
+        AlertDialog(
+            onDismissRequest = { noteFor = null },
+            title = { Text("Заметка к отчёту") },
+            text = {
+                androidx.compose.material3.OutlinedTextField(value = text, onValueChange = { text = it.take(300) },
+                    placeholder = { Text("Например: заменил датчик, после мойки") }, modifier = Modifier.fillMaxWidth())
+            },
+            confirmButton = { TextButton(onClick = { onNote(r, text); noteFor = null }) { Text("Сохранить") } },
+            dismissButton = { TextButton(onClick = { noteFor = null }) { Text("Отмена") } },
+        )
+    }
+    confirmDelete?.let { r ->
+        AlertDialog(
+            onDismissRequest = { confirmDelete = null },
+            title = { Text("Удалить отчёт?") },
+            text = { Text("${r.title}\n\nОтчёт будет удалён с телефона без возможности восстановления.") },
+            confirmButton = {
+                TextButton(onClick = { onDelete(r); confirmDelete = null }) { Text("Удалить", color = Status.colors.error.accent) }
+            },
+            dismissButton = { TextButton(onClick = { confirmDelete = null }) { Text("Отмена") } },
+        )
     }
 }

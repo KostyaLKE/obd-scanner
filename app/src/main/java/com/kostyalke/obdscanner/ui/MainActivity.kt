@@ -78,13 +78,13 @@ class MainActivity : ComponentActivity() {
 
 /** [label] — короткая подпись вкладки (влезает и при крупном шрифте), [title] — заголовок экрана. */
 enum class Tab(val label: String, val title: String, val icon: ImageVector) {
-    ERRORS("Ошибки", "Ошибки", Icons.Filled.Warning),
+    ERRORS("Диагностика", "Диагностика", Icons.Filled.Warning),
     LIVE("Датчики", "Датчики", AppIcons.Speed),
-    READY("Тесты", "Готовность систем", Icons.Filled.CheckCircle),
+    REPORTS("Отчёты", "Отчёты", AppIcons.History),
     CAR("Авто", "Авто", AppIcons.Car),
 }
 
-private enum class Overlay { NONE, LOG, HISTORY }
+private enum class Overlay { NONE, LOG, HISTORY, READY }
 
 private fun Context.shareText(title: String, text: String) {
     val send = Intent(Intent.ACTION_SEND).apply {
@@ -104,6 +104,8 @@ private fun App(vm: AppViewModel) {
     val connected = conn as? ConnState.Connected
     val update by vm.update.collectAsStateWithLifecycle()
     val vag by vm.vag.collectAsStateWithLifecycle()
+    val check by vm.check.collectAsStateWithLifecycle()
+    val vehicle by vm.vehicle.collectAsStateWithLifecycle()
     var autoUpdate by remember { mutableStateOf(vm.autoUpdate) }
 
     BackHandler(enabled = overlay != Overlay.NONE) { overlay = Overlay.NONE }
@@ -111,7 +113,8 @@ private fun App(vm: AppViewModel) {
     AppScaffold(
         title = when {
             overlay == Overlay.LOG -> "Журнал обмена"
-            overlay == Overlay.HISTORY -> "История отчётов"
+            overlay == Overlay.HISTORY -> "Отчёты"
+            overlay == Overlay.READY -> "Готовность систем"
             connected != null -> tab.title
             else -> "OBD Сканер"
         },
@@ -148,11 +151,21 @@ private fun App(vm: AppViewModel) {
             )
         },
     ) {
+        val reportsScreen: @Composable () -> Unit = {
+            val reports by vm.reports.collectAsStateWithLifecycle()
+            var keep by remember { mutableStateOf(vm.keepReports) }
+            LaunchedEffect(Unit) { vm.refreshReports() }
+            HistoryContent(reports, onShare = { ctx.shareText("Отправить отчёт", it.text) }, onDelete = vm::deleteReport,
+                onNote = vm::setReportNote, keep = keep, onKeep = { keep = it; vm.keepReports = it })
+        }
         when {
-            overlay == Overlay.HISTORY -> {
-                val reports by vm.reports.collectAsStateWithLifecycle()
-                LaunchedEffect(Unit) { vm.refreshReports() }
-                HistoryContent(reports, onShare = { ctx.shareText("Отправить отчёт", it.text) }, onDelete = vm::deleteReport)
+            overlay == Overlay.HISTORY -> reportsScreen()
+            overlay == Overlay.READY -> {
+                val rd by vm.readiness.collectAsStateWithLifecycle()
+                val since by vm.sinceCleared.collectAsStateWithLifecycle()
+                val busy by vm.busy.collectAsStateWithLifecycle()
+                LaunchedEffect(Unit) { if (rd == null || since.isEmpty()) vm.readReadiness() }
+                ReadinessContent(rd, since, busy, vm::readReadiness)
             }
             overlay == Overlay.LOG -> {
                 val log by vm.log.collectAsStateWithLifecycle()
@@ -166,7 +179,7 @@ private fun App(vm: AppViewModel) {
                     st = dtc,
                     warnings = connected.warnings,
                     info = vm.db::info,
-                    onRead = vm::readDtcs,
+                    onRead = vm::checkCar,
                     onClear = vm::clearDtcs,
                     vag = vag,
                     vagSupported = vm.vagSupported(),
@@ -178,6 +191,12 @@ private fun App(vm: AppViewModel) {
                     onShareLog = { ctx.shareText("Отправить журнал", vm.shareLog()) },
                     onConfirmClear = vm::confirmClear,
                     onCancelClear = vm::cancelClear,
+                    check = check,
+                    carLine = vehicle?.let { v ->
+                        listOfNotNull(v.vin?.let { "VIN $it" }, v.ecuName).joinToString(" · ").ifEmpty { null }
+                    },
+                    onCancelCheck = vm::cancelCheck,
+                    onReadiness = { overlay = Overlay.READY },
                     onSearch = { q ->
                         val url = "https://www.google.com/search?q=" + java.net.URLEncoder.encode(q, "UTF-8")
                         runCatching { ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
@@ -189,15 +208,10 @@ private fun App(vm: AppViewModel) {
                         vm.startLive()
                         onDispose { vm.stopLive() }
                     }
-                    LiveContent(live, vm::toggleFavorite, vm::setOnlyFavorites, vm::resetMinMax)
+                    LiveContent(live, vm::toggleFavorite, vm::setOnlyFavorites, vm::resetMinMax,
+                        paused = check.running || dtc.loading || dtc.clearing || vag.scanning || vag.backingUp)
                 }
-                Tab.READY -> {
-                    val rd by vm.readiness.collectAsStateWithLifecycle()
-                    val since by vm.sinceCleared.collectAsStateWithLifecycle()
-                    val busy by vm.busy.collectAsStateWithLifecycle()
-                    LaunchedEffect(Unit) { if (rd == null || since.isEmpty()) vm.readReadiness() }
-                    ReadinessContent(rd, since, busy, vm::readReadiness)
-                }
+                Tab.REPORTS -> reportsScreen()
                 Tab.CAR -> {
                     val info by vm.vehicle.collectAsStateWithLifecycle()
                     val busy by vm.busy.collectAsStateWithLifecycle()
@@ -258,7 +272,7 @@ fun AppScaffold(
                             IconButton(onClick = { menu = true }) { Icon(Icons.Filled.MoreVert, contentDescription = "Меню") }
                             DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
                                 DropdownMenuItem(
-                                    text = { Text("История отчётов") },
+                                    text = { Text("Отчёты") },
                                     leadingIcon = { Icon(AppIcons.History, null) },
                                     onClick = { menu = false; onHistory() },
                                 )
@@ -308,7 +322,13 @@ fun AppScaffold(
                                 }
                             } else Icon(t.icon, contentDescription = null)
                         },
-                        label = { Text(t.label, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                        // Подписи не обрезаем: размер задан в dp и не растёт с системным шрифтом,
+                        // иначе «Диагностика» не помещается в четверть экрана.
+                        label = {
+                            val size = with(androidx.compose.ui.platform.LocalDensity.current) { 11.dp.toSp() }
+                            Text(t.label, maxLines = 1, softWrap = false, fontSize = size,
+                                style = MaterialTheme.typography.labelSmall)
+                        },
                     )
                 }
             }

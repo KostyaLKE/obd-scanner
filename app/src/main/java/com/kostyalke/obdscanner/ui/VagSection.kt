@@ -61,10 +61,10 @@ fun VagSection(
     onShareLog: () -> Unit = {},
 ) {
     Column {
-        SectionTitle("Все блоки автомобиля", trailing = st.time?.let { SimpleDateFormat("HH:mm", Locale.US).format(Date(it)) })
+        SectionTitle("Остальные блоки", trailing = st.time?.let { SimpleDateFormat("HH:mm", Locale.US).format(Date(it)) })
         if (!supported) {
-            StatusNote("Только для VAG с шиной CAN", Status.colors.neutral, Icons.Filled.Info,
-                "Опрос ABS, подушек и приборки работает на Skoda/VW/Audi/Seat примерно с 2008 года.", compact = true)
+            StatusNote("Блоки не проверялись", Status.colors.neutral, Icons.Filled.Info,
+                "Опрос ABS, подушек и приборной панели работает только на шине CAN 11 бит / 500 кбит/с.", compact = true)
             return
         }
         Panel {
@@ -77,22 +77,23 @@ fun VagSection(
                 }
                 st.results.isEmpty() -> Column(Modifier.padding(16.dp)) {
                     Text(
-                        "Проверка ошибок в ABS, подушках безопасности, приборной панели, электронике и других " +
-                            "блоках. Занимает около 30 секунд, зажигание должно быть включено.",
+                        "ABS, подушки безопасности, приборная панель и другие блоки ещё не проверялись. " +
+                            "Нажмите «Проверить автомобиль»; зажигание должно быть включено.",
                         style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
             }
             val responded = st.results.filter { it.responded }
             responded.forEachIndexed { i, r ->
-                if (i > 0 || st.scanning) PanelDivider()
+                if (i > 0 || st.scanning || st.results.isEmpty()) PanelDivider()
                 VagRow(r, dtcText, clearing = st.clearing == r.module.address, onClear = { onClear(r.module) })
             }
             val silent = st.results.filter { !it.responded }
             if (silent.isNotEmpty() && !st.scanning) {
                 PanelDivider()
                 Text(
-                    "Не ответили (нет в машине или спят): " + silent.joinToString(", ") { it.module.title.lowercase() },
+                    // Молчание не значит, что блока нет в машине или что он исправен.
+                    "Нет ответа (не проверены): " + silent.joinToString(", ") { it.module.title.lowercase() },
                     style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(16.dp),
                 )
@@ -111,10 +112,6 @@ fun VagSection(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    FilledTonalButton(onClick = onScan, contentPadding = ButtonPadding,
-                        modifier = Modifier.heightIn(min = 44.dp)) {
-                        Text(if (st.results.isEmpty()) "Проверить все блоки" else "Проверить снова")
-                    }
                     if (st.results.any { it.responded }) {
                         OutlinedButton(onClick = onBackup, contentPadding = ButtonPadding,
                             modifier = Modifier.heightIn(min = 44.dp)) {
@@ -168,8 +165,8 @@ private fun VagRow(r: VagModuleResult, dtcText: (com.kostyalke.obdscanner.vag.Va
             Spacer(Modifier.width(8.dp))
             when {
                 r.error != null -> StatusPill(r.errorKind?.label ?: "сбой обмена", tone, AppIcons.Error)
-                r.dtcs.isEmpty() -> StatusPill("ок", tone, Icons.Filled.CheckCircle)
-                else -> StatusPill("${r.dtcs.size} ${plural(r.dtcs.size, "ошибка", "ошибки", "ошибок")}", tone, AppIcons.Error)
+                r.dtcs.isEmpty() -> StatusPill("ошибок не найдено", tone, Icons.Filled.CheckCircle)
+                else -> StatusPill("найдено ${r.dtcs.size} ${plural(r.dtcs.size, "ошибка", "ошибки", "ошибок")}", tone, AppIcons.Error)
             }
         }
         if (expanded) {

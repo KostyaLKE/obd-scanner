@@ -17,6 +17,8 @@ object VagScanner {
         log: (String) -> Unit,
         /** Вызывается, если ELM не вернулся к OBD, — даже когда опрос завершился исключением. */
         onRestoreFailed: () -> Unit = {},
+        /** Результат каждого опрошенного блока сразу — чтобы при отмене не потерять уже прочитанное. */
+        onResult: (VagModuleResult) -> Unit = {},
         progress: (String, Float) -> Unit,
     ): VagScan {
         var restored = true
@@ -40,7 +42,7 @@ object VagScanner {
             }
             targets.forEachIndexed { i, (m, tpA) ->
                 progress("${m.title} (TP2.0)", 0.6f * i / targets.size)
-                found += Tp20.scanModule(tp, m, tpA)
+                found += Tp20.scanModule(tp, m, tpA).also(onResult)
             }
         } catch (e: VagException) {
             log("VAG: TP2.0 недоступен: ${e.message}")
@@ -66,6 +68,7 @@ object VagScanner {
                     // чтобы не выдать его за «блок не ответил».
                     val u = Uds.scanModule(uds, r.module)
                     if (u != null) {
+                        onResult(u)
                         val idx = merged.indexOfFirst { it.module.address == u.module.address }
                         if (idx >= 0) merged[idx] = u
                     }

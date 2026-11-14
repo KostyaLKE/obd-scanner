@@ -77,9 +77,14 @@ fun ErrorsContent(
     onShareLog: () -> Unit = {},
     onConfirmClear: () -> Unit = {},
     onCancelClear: () -> Unit = {},
+    check: CheckState = CheckState(),
+    /** Автомобиль, если он достоверно определён (VIN, название блока двигателя). */
+    carLine: String? = null,
+    onCancelCheck: () -> Unit = {},
+    onReadiness: () -> Unit = {},
 ) {
     val report = st.report
-    val busy = st.loading || st.clearing
+    val busy = st.loading || st.clearing || check.running || vag.scanning
 
     Column(Modifier.fillMaxSize()) {
         if (busy) LinearProgressIndicator(Modifier.fillMaxWidth()) else Spacer(Modifier.height(4.dp))
@@ -88,7 +93,25 @@ fun ErrorsContent(
             contentPadding = ScreenPadding,
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            item { SummaryPanel(report, st.loading, st.stale) }
+            if (check.running) item {
+                Panel {
+                    Column(Modifier.padding(16.dp)) {
+                        Text(check.stage ?: "Проверка…", style = MaterialTheme.typography.titleSmall,
+                            color = MaterialTheme.colorScheme.onSurface)
+                        val detail = listOfNotNull(
+                            vag.current?.takeIf { vag.scanning }?.let { "Сейчас: $it" },
+                            "Проверено блоков: ${check.blocksDone}".takeIf { vag.scanning || check.blocksDone > 0 },
+                        ).joinToString(" · ")
+                        if (detail.isNotEmpty()) Text(detail, style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Spacer(Modifier.height(8.dp))
+                        LinearProgressIndicator(Modifier.fillMaxWidth())
+                        TextButton(onClick = onCancelCheck) { Text("Отменить проверку") }
+                    }
+                }
+            }
+            item { SummaryPanel(report, busy, st.stale, vag, check, carLine) }
+            check.note?.let { item { StatusNote(it, Status.colors.warning, Icons.Filled.Info, compact = true) } }
             warnings.forEach { w ->
                 item { StatusNote(w, Status.colors.warning, Icons.Filled.Warning, compact = true) }
             }
@@ -108,6 +131,7 @@ fun ErrorsContent(
             }
 
             if (report != null) {
+                item(key = "engine") { EngineHeader(report, st.stale) }
                 for (kind in DtcKind.entries) {
                     val list = report.all.filter { it.kind == kind }
                     if (list.isEmpty()) continue
@@ -127,7 +151,27 @@ fun ErrorsContent(
                         item { Panel { Column(Modifier.padding(16.dp)) { FreezeFrameTable(ff) } } }
                     }
                 }
+                report.readiness?.let { rd ->
+                    item(key = "readiness") {
+                        val done = rd.monitors.count { it.state == com.kostyalke.obdscanner.obd.MonitorState.COMPLETE }
+                        Panel(Modifier.clickable(onClick = onReadiness)) {
+                            Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Column(Modifier.weight(1f)) {
+                                    Text("Готовность систем", style = MaterialTheme.typography.titleSmall,
+                                        color = MaterialTheme.colorScheme.onSurface)
+                                    Text("Завершены ли самопроверки автомобиля: $done из ${rd.monitors.size}",
+                                        style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
+                                Text("Подробнее", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
+                            }
+                        }
+                    }
+                }
+            }
+            if (report != null || vag.results.isNotEmpty() || vag.scanning) {
                 item(key = "vag") { VagSection(vag, vagSupported, vagDtcText, onVagScan, onVagClear, onVagBackup, onShareBackup, onShareLog) }
+            }
+            if (report != null) {
                 if (report.notes.isNotEmpty()) {
                     item {
                         Row(Modifier.padding(top = 12.dp, start = 4.dp, end = 4.dp)) {
@@ -141,11 +185,12 @@ fun ErrorsContent(
             }
         }
         ActionBar {
+            // Главное действие экрана: двигатель по OBD + доступные блоки VAG одной кнопкой.
             Button(onClick = onRead, enabled = !busy, modifier = Modifier.weight(1f).heightIn(min = 48.dp),
                 contentPadding = ButtonPadding) {
-                Text(if (report == null) "Прочитать ошибки" else "Прочитать", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text("Проверить автомобиль", textAlign = androidx.compose.ui.text.style.TextAlign.Center)
             }
-            if (report != null) {
+            if (report != null && !check.running) {
                 // Словами, не значком: корзину многие не понимают. Красный — действие необратимое.
                 OutlinedButton(
                     onClick = onClear,
@@ -176,55 +221,72 @@ fun ErrorsContent(
     }
 }
 
+/**
+ * Состояние диагностики: автомобиль (если определён), связь, время и результат.
+ * «Автомобиль исправен» не пишем: отсутствие считанных ошибок этого не доказывает.
+ */
 @Composable
-private fun SummaryPanel(report: DtcReport?, loading: Boolean, stale: Boolean = false) {
-    if (report == null) {
-        val tone = Status.colors.neutral
+private fun SummaryPanel(
+    report: DtcReport?,
+    busy: Boolean,
+    stale: Boolean = false,
+    vag: VagState = VagState(),
+    check: CheckState = CheckState(),
+    carLine: String? = null,
+) {
+    val link = "Адаптер подключён · связь с автомобилем установлена"
+    if (report == null && vag.results.isEmpty()) {
         Surface(Modifier.fillMaxWidth(), shape = PanelShape, color = MaterialTheme.colorScheme.surfaceContainer) {
             Column(Modifier.padding(20.dp)) {
-                Text(if (loading) "Читаю ошибки…" else "Ошибки ещё не читались",
-                    style = MaterialTheme.typography.titleLarge, color = tone.onContainer)
+                Text(if (busy) "Идёт проверка…" else "Проверка ещё не выполнялась",
+                    style = MaterialTheme.typography.titleLarge, color = Status.colors.neutral.onContainer)
                 Spacer(Modifier.height(4.dp))
-                Text(
-                    "На старых VAG с K-line чтение занимает 10–20 секунд.",
-                    style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+                carLine?.let { Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                Text(link, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
         return
     }
-    val confirmed = report.stored.size + report.permanent.size
-    val pending = report.pending.size
-    val mil = report.readiness?.milOn
-    val failed = report.failed
-    val mismatch = report.mismatch
+    val confirmed = (report?.stored?.size ?: 0) + (report?.permanent?.size ?: 0)
+    val pending = report?.pending?.size ?: 0
+    val vagErrors = vag.results.sumOf { it.dtcs.size }
+    val checkedBlocks = vag.results.count { it.responded && it.error == null }
+    val mil = report?.readiness?.milOn
+    val failed = report?.failed ?: emptyList()
+    val mismatch = report?.mismatch
+    val total = confirmed + vagErrors
+    val incomplete = failed.isNotEmpty() || mismatch != null || check.interrupted || vag.results.any { it.error != null }
     // Зелёный — только когда все запросы дали корректный ответ и нет расхождений.
     val tone = when {
-        confirmed > 0 -> Status.colors.error
-        pending > 0 || mil == true || failed.isNotEmpty() || mismatch != null || stale -> Status.colors.warning
+        total > 0 && !stale -> Status.colors.error
+        pending > 0 || mil == true || incomplete || stale -> Status.colors.warning
         else -> Status.colors.ok
     }
     val title = when {
-        confirmed > 0 -> "$confirmed ${plural(confirmed, "ошибка", "ошибки", "ошибок")}"
-        pending > 0 -> "$pending ${plural(pending, "ожидающая", "ожидающие", "ожидающих")}"
-        failed.isNotEmpty() -> "Диагностика неполная"
-        mismatch != null -> "Данные расходятся"
-        else -> "Ошибок нет"
+        stale -> "Данные устарели"
+        total > 0 -> "Найдены ошибки: $total"
+        pending > 0 -> "Ожидающие ошибки: $pending"
+        incomplete -> "Проверка неполная"
+        else -> "Ошибок в проверенных блоках нет"
     }
-    val sub = buildList {
-        if (stale) add("Устарело: новое чтение не удалось")
-        if (failed.isNotEmpty() && (confirmed > 0 || pending > 0)) add("диагностика неполная")
-        failed.forEach { add("не прочитаны ${it.text}") }
+    val lines = buildList {
+        carLine?.let { add(it) }
+        add(link)
+        if (stale) add("Новое чтение не удалось — показан прежний результат")
+        add("Проверено: " + listOfNotNull("двигатель".takeIf { report != null },
+            "блоков — $checkedBlocks".takeIf { vag.results.isNotEmpty() }).joinToString(", ").ifEmpty { "ничего" })
+        if (incomplete && (total > 0 || pending > 0)) add("Проверка неполная")
+        failed.forEach { add("Не прочитаны ${it.text}") }
         mismatch?.let { add(it) }
-        report.unsupported.forEach { add(it.text) }
-        if (confirmed > 0 && pending > 0) add("ещё $pending ${plural(pending, "ожидающая", "ожидающие", "ожидающих")}")
+        report?.unsupported?.forEach { add(it.text) }
+        if (total > 0 && pending > 0) add("Ещё $pending ${plural(pending, "ожидающая", "ожидающие", "ожидающих")}")
         when (mil) {
             true -> add("Check Engine горит")
             false -> add("Check Engine не горит")
             null -> {}
         }
-        add("прочитано в " + SimpleDateFormat("HH:mm", Locale.US).format(Date(report.time)))
-    }.joinToString(" · ")
+        (check.time ?: report?.time)?.let { add("Последняя проверка: " + SimpleDateFormat("HH:mm", Locale.US).format(Date(it))) }
+    }
     Surface(Modifier.fillMaxWidth(), shape = PanelShape, color = tone.container) {
         Row(Modifier.padding(20.dp), verticalAlignment = Alignment.CenterVertically) {
             Icon(
@@ -234,8 +296,24 @@ private fun SummaryPanel(report: DtcReport?, loading: Boolean, stale: Boolean = 
             Spacer(Modifier.width(16.dp))
             Column {
                 Text(title, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold, color = tone.onContainer)
-                Text(sub, style = MaterialTheme.typography.bodyMedium, color = tone.onContainer)
+                lines.forEach { Text(it, style = MaterialTheme.typography.bodyMedium, color = tone.onContainer) }
             }
+        }
+    }
+}
+
+/** Карточка-заголовок блока двигателя (стандартный OBD) с его собственным статусом. */
+@Composable
+private fun EngineHeader(report: DtcReport, stale: Boolean) {
+    val n = report.stored.size + report.permanent.size + report.pending.size
+    Row(Modifier.fillMaxWidth().padding(start = 4.dp, end = 4.dp, top = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text("Двигатель", style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onSurface,
+            modifier = Modifier.weight(1f))
+        when {
+            stale -> StatusPill("данные устарели", Status.colors.warning, Icons.Filled.Warning)
+            n > 0 -> StatusPill("найдено $n ${plural(n, "ошибка", "ошибки", "ошибок")}", Status.colors.error, AppIcons.Error)
+            !report.isComplete -> StatusPill(report.failed.first().status.text, Status.colors.warning, Icons.Filled.Warning)
+            else -> StatusPill("ошибок не найдено", Status.colors.ok, Icons.Filled.CheckCircle)
         }
     }
 }

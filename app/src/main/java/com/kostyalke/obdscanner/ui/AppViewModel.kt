@@ -95,7 +95,14 @@ sealed interface ConnState {
 
 data class PairedDevice(val name: String, val address: String)
 
-data class LiveValue(val value: Double, val min: Double, val max: Double, val history: List<Float>)
+data class LiveValue(
+    val value: Double,
+    val min: Double,
+    val max: Double,
+    val history: List<Float>,
+    /** Когда значение получено — чтобы показать устаревание. */
+    val time: Long = System.currentTimeMillis(),
+)
 
 data class LiveState(
     val supported: List<PidDef> = emptyList(),
@@ -119,6 +126,18 @@ data class VagState(
     /** Текст последнего снимка данных блоков (JSON) — для «Поделиться». */
     val backupJson: String? = null,
     val backupInfo: String? = null,
+)
+
+/** Ход и итог «Проверить автомобиль». */
+data class CheckState(
+    val running: Boolean = false,
+    val stage: String? = null,
+    /** Сколько блоков VAG уже опрошено. */
+    val blocksDone: Int = 0,
+    /** Время последней проверки. */
+    val time: Long? = null,
+    val note: String? = null,
+    val interrupted: Boolean = false,
 )
 
 data class DtcState(
@@ -223,7 +242,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         val scope = sessionScope ?: return false
         if (!opLock.tryLock()) return false
         val sid = session
-        scope.launch {
+        currentOp = scope.launch {
             adapterDirty = false
             val op = this
             try {
@@ -239,9 +258,12 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 // но только если это всё ещё то же подключение.
                 if (adapterDirty && sid == session && service != null) reinitAdapter() else adapterDirty = false
             }
-        }.invokeOnCompletion { opLock.unlock() }
+        }.also { it.invokeOnCompletion { opLock.unlock() } }
         return true
     }
+
+    /** Текущая операция — чтобы её можно было отменить («Отменить проверку»). */
+    private var currentOp: Job? = null
 
     /** Признак текущей операции VAG: настройки ELM не вернулись. */
     private var adapterDirty = false
@@ -491,6 +513,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                         _readiness.value = null
                         _dtc.value = DtcState()
                         _vag.value = VagState()
+                        _check.value = CheckState()
                         catching { loadSupported() }
                         _live.update { it.copy(loading = false) }
                         if (liveWanted) launchLive()
@@ -609,48 +632,123 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     fun scanVag() {
         if (_vag.value.scanning || !vagSupported()) return
-        stopLive()
-        launchOp {
-            _vag.value = VagState(scanning = true)
-            try {
-                withService { s ->
-                    s.elm.exclusive { send ->
-                        val scan = com.kostyalke.obdscanner.vag.VagScanner.scanAll(
-                            send, s.elm.protocol.code, ::log, onRestoreFailed = { adapterDirty = true },
-                        ) { title, p ->
-                            _vag.update { it.copy(current = title, progress = p) }
+        launchOp { doScanVag(save = true) }
+    }
+
+    /**
+     * Опрос блоков VAG. Результат каждого блока попадает на экран сразу, поэтому при отмене
+     * уже прочитанное не теряется. Ошибки опроса — в [VagState.error], не исключением.
+     */
+    private suspend fun doScanVag(save: Boolean, onModule: (Int) -> Unit = {}) {
+        _vag.value = VagState(scanning = true)
+        var done = 0
+        try {
+            withService { s ->
+                s.elm.exclusive { send ->
+                    val scan = com.kostyalke.obdscanner.vag.VagScanner.scanAll(
+                        send, s.elm.protocol.code, ::log, onRestoreFailed = { adapterDirty = true },
+                        onResult = { r ->
+                            onModule(++done)
+                            _vag.update { st -> st.copy(results = st.results.filter { it.module.address != r.module.address } + r) }
+                        },
+                    ) { title, p ->
+                        _vag.update { it.copy(current = title, progress = p) }
+                    }
+                    _vag.update { it.copy(results = scan.results) }
+                    if (!scan.adapterRestored) adapterDirty = true
+                    val res = _vag.value.results
+                    log("VAG: итог — " + res.joinToString(", ") {
+                        "${it.module.addressText}:" + when {
+                            !it.responded -> "нет"
+                            it.error != null -> "ошибка"
+                            else -> "${it.protocol}/${it.dtcs.size}"
                         }
-                        _vag.update { it.copy(results = scan.results) }
-                        if (!scan.adapterRestored) adapterDirty = true
-                        val res = _vag.value.results
-                        log("VAG: итог — " + res.joinToString(", ") {
-                            "${it.module.addressText}:" + when {
-                                !it.responded -> "нет"
-                                it.error != null -> "ошибка"
-                                else -> "${it.protocol}/${it.dtcs.size}"
-                            }
-                        })
-                        if (res.none { it.responded }) {
-                            _vag.update {
-                                it.copy(error = "Ни один блок не ответил ни по TP2.0, ни по UDS. Причина может быть в адаптере " +
-                                    "(дешёвые клоны часто не умеют «сырой» CAN: ATPB/ATSP B или ATCAF0+ATV1, фильтр ATCRA), " +
-                                    "в выключенном зажигании или в самой машине. Точно видно по журналу обмена — пришлите его.")
-                            }
+                    })
+                    if (res.none { it.responded }) {
+                        _vag.update {
+                            it.copy(error = "Ни один блок не ответил ни по TP2.0, ни по UDS. Причина может быть в адаптере " +
+                                "(дешёвые клоны часто не умеют «сырой» CAN: ATPB/ATSP B или ATCAF0+ATV1, фильтр ATCRA), " +
+                                "в выключенном зажигании или в самой машине. Точно видно по журналу обмена — пришлите его.")
                         }
                     }
                 }
-                _vag.update { it.copy(time = System.currentTimeMillis()) }
-                autoSaveVag()
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: VagException) {
-                _vag.update { it.copy(error = e.message) }
-            } catch (e: Exception) {
-                _vag.update { it.copy(error = humanError(e)) }
+            }
+            _vag.update { it.copy(time = System.currentTimeMillis()) }
+            if (save) autoSaveVag()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: VagException) {
+            _vag.update { it.copy(error = e.message) }
+        } catch (e: Exception) {
+            _vag.update { it.copy(error = humanError(e)) }
+        } finally {
+            _vag.update { it.copy(scanning = false, current = null, progress = 1f) }
+        }
+    }
+
+    // ---------- Проверить автомобиль ----------
+
+    private val _check = MutableStateFlow(CheckState())
+    val check: StateFlow<CheckState> = _check.asStateFlow()
+
+    /**
+     * Главная кнопка: чтение двигателя по OBD, затем доступная расширенная диагностика VAG.
+     * Если блоки VAG недоступны — результат OBD сохраняется, ограничение объясняется.
+     * Один отчёт на всю проверку, в том числе частичный (отмена, обрыв).
+     */
+    fun checkCar() {
+        launchOp {
+            _check.value = CheckState(running = true, stage = "Автомобиль: VIN и блок двигателя")
+            _dtc.update { it.copy(outcome = null, warning = null) }
+            var interrupted = true
+            var note: String? = null
+            try {
+                // VIN нужен в шапке и в отчёте; читаем один раз за подключение.
+                if (_vehicle.value == null) catching { withService { it.vehicleInfo() } }.getOrNull()?.let { _vehicle.value = it }
+                _check.update { it.copy(stage = "Двигатель: чтение ошибок") }
+                doReadDtcs(save = false)
+                if (vagSupported()) {
+                    _check.update { it.copy(stage = "Блоки автомобиля", blocksDone = 0) }
+                    doScanVag(save = false) { n -> _check.update { it.copy(blocksDone = n) } }
+                } else {
+                    _vag.value = VagState()
+                    note = "Расширенная проверка блоков (ABS, подушки, приборная панель) на этом протоколе недоступна — " +
+                        "проверен только двигатель по OBD."
+                }
+                interrupted = false
             } finally {
-                _vag.update { it.copy(scanning = false, current = null, progress = 1f) }
+                // И при отмене, и при обрыве сохраняем то, что успели прочитать.
+                withContext(kotlinx.coroutines.NonCancellable) {
+                    val r = _dtc.value.report?.takeIf { !_dtc.value.stale }
+                    val vag = _vag.value.results
+                    val now = System.currentTimeMillis()
+                    val part = if (interrupted) listOf("Проверка прервана: показано только то, что успели прочитать.") else emptyList()
+                    val text = when {
+                        r != null -> reportText(r, if (interrupted) "неполная проверка" else "проверка автомобиля", part)
+                        vag.isNotEmpty() -> ReportFormatter.formatVagScan(vag, now, _vehicle.value,
+                            _conn.value as? ConnState.Connected, db, demoNote() + part)
+                        else -> null
+                    }
+                    if (text != null) {
+                        val meta = ReportMeta(
+                            if (interrupted) "неполная проверка" else "проверка автомобиля",
+                            errors = (r?.all?.size ?: 0) + vag.sumOf { it.dtcs.size },
+                            complete = !interrupted && r != null && r.isComplete && r.mismatch == null && vag.none { it.error != null },
+                        )
+                        val (_, err) = saveReport(text, now, meta)
+                        if (err != null) note = "Отчёт не сохранён в историю: $err. Результат остаётся на экране."
+                    }
+                    if (interrupted) note = "Проверка прервана — показано и сохранено то, что успели прочитать."
+                    _check.value = CheckState(running = false, time = now, note = note, interrupted = interrupted,
+                        blocksDone = vag.size)
+                }
             }
         }
+    }
+
+    /** Отмена проверки: уже прочитанное остаётся на экране и сохраняется. */
+    fun cancelCheck() {
+        if (_check.value.running) currentOp?.cancel()
     }
 
     private val backups by lazy { com.kostyalke.obdscanner.data.BackupStore(getApplication()) }

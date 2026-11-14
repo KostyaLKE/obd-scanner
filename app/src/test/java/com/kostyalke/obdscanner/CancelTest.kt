@@ -91,4 +91,16 @@ class CancelTest {
         } catch (e: com.kostyalke.obdscanner.elm.ElmTimeoutException) { /* ожидаемо */ }
         assertTrue("неудачный возврат настроек потерян", restoreFailed)
     }
+
+    @Test
+    fun resultsObtainedBeforeCancelAreDelivered() = runBlocking {
+        val f = Fake()
+        f.cancelAt = 4
+        val got = ArrayList<String>()
+        val job = launch { VagScanner.scanAll(send(f), '6', {}, onResult = { got += it.module.title }) { _, _ -> } }
+        f.job = job
+        job.join()
+        assertTrue(job.isCancelled)
+        assertTrue("уже опрошенные блоки потеряны при отмене", got.isNotEmpty())
+    }
 }
