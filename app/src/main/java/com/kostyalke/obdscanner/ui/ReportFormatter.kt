@@ -72,24 +72,47 @@ object ReportFormatter {
         }
         if (vag.isNotEmpty()) {
             appendLine()
-            appendLine("Все блоки (VAG):")
-            for (m in vag.filter { it.responded }) {
-                val head = "  ${m.module.addressText} ${m.module.title}" + (m.partNumber?.let { " ($it)" } ?: "")
-                appendLine(head + ": " + when {
-                    m.error != null -> "${m.errorKind?.label ?: "сбой обмена"} — ${m.error}"
-                    m.dtcs.isEmpty() -> "ошибок нет"
-                    else -> "ошибок ${m.dtcs.size}"
-                })
-                for (d in m.dtcs) appendLine("    " + vagDtcText(d, db))
-            }
-            val silent = vag.filter { !it.responded }.joinToString(", ") { it.module.addressText }
-            if (silent.isNotEmpty()) appendLine("  Не ответили: $silent")
+            appendVag(vag, db)
         }
         if (r.notes.isNotEmpty()) {
             appendLine()
             r.notes.forEach { appendLine("Примечание: $it") }
         }
     }
+}
+
+private fun StringBuilder.appendVag(vag: List<com.kostyalke.obdscanner.vag.VagModuleResult>, db: DtcDatabase) {
+    appendLine("Все блоки (VAG):")
+    for (m in vag.filter { it.responded }) {
+        val head = "  ${m.module.addressText} ${m.module.title}" + (m.partNumber?.let { " ($it)" } ?: "")
+        appendLine(head + ": " + when {
+            m.error != null -> "${m.errorKind?.label ?: "сбой обмена"} — ${m.error}"
+            m.dtcs.isEmpty() -> "ошибок нет"
+            else -> "ошибок ${m.dtcs.size}"
+        })
+        for (d in m.dtcs) appendLine("    " + vagDtcText(d, db))
+    }
+    // Молчание блока не значит, что его нет в машине, и не значит, что он исправен.
+    val silent = vag.filter { !it.responded }.joinToString(", ") { it.module.addressText }
+    if (silent.isNotEmpty()) appendLine("  Не ответили (не проверены): $silent")
+}
+
+/** Отчёт только по опросу блоков VAG (когда чтения OBD в этой сессии не было). */
+fun ReportFormatter.formatVagScan(
+    vag: List<com.kostyalke.obdscanner.vag.VagModuleResult>,
+    time: Long,
+    v: VehicleInfo?,
+    conn: ConnState.Connected?,
+    db: DtcDatabase,
+    extra: List<String> = emptyList(),
+): String = buildString {
+    val date = SimpleDateFormat("dd.MM.yyyy HH:mm", Locale("ru")).format(Date(time))
+    appendLine("Отчёт диагностики · $date · блоки VAG")
+    extra.forEach { appendLine(it) }
+    conn?.let { appendLine("Адаптер: ${it.deviceName} (${it.elmVersion}), протокол: ${it.protocol}") }
+    appendLine("VIN: ${v?.vin ?: "не прочитан"}")
+    appendLine()
+    appendVag(vag, db)
 }
 
 /** Отчёт по одному блоку VAG (сброс ошибок блока: «до» и «после»). */

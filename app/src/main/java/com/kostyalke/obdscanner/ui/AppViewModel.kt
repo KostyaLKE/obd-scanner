@@ -7,7 +7,11 @@ import android.content.Context
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.kostyalke.obdscanner.data.HistoryStore
+import com.kostyalke.obdscanner.data.ReportMeta
 import com.kostyalke.obdscanner.data.SavedReport
+import com.kostyalke.obdscanner.obd.OutcomeKind
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import com.kostyalke.obdscanner.elm.BluetoothTransport
 import com.kostyalke.obdscanner.elm.ConnectProblem
 import com.kostyalke.obdscanner.elm.DemoTransport
@@ -138,7 +142,7 @@ data class ClearPrep(
     val module: VagModule?,
     val title: String,
     val lines: List<String>,
-    /** Имя файла отчёта «до сброса»; null — сохранить не удалось. */
+    /** Идентификатор отчёта «до сброса» в истории; null — сохранить не удалось. */
     val beforeName: String?,
     /** Коды до сброса — для сравнения «исчезли / остались / появились». */
     val beforeCodes: List<String> = emptyList(),
@@ -604,6 +608,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     }
                 }
                 _vag.update { it.copy(time = System.currentTimeMillis()) }
+                autoSaveVag()
             } catch (e: CancellationException) {
                 throw e
             } catch (e: VagException) {
@@ -677,11 +682,12 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 val withData = list.filter { it.hasData }
                 if (withData.isEmpty()) throw VagException("ни один блок не отдал данные")
                 val time = System.currentTimeMillis()
-                val file = backups.save(withData, _vehicle.value?.vin, time, versionName, failed)
+                val vin = _vehicle.value?.vin
+                val json = withContext(Dispatchers.IO) { backups.save(withData, vin, time, versionName, failed).readText() }
                 val fullCount = withData.count { it.complete }
                 _vag.update {
                     it.copy(
-                        backupJson = file.readText(),
+                        backupJson = json,
                         backupInfo = "Снимок данных блоков сохранён: полностью — $fullCount, " +
                             "частично — ${withData.size - fullCount}, не прочитаны — ${failed.size}" +
                             (if (failed.isNotEmpty()) " (" + failed.joinToString(", ") { f -> f.first.title } + ")" else "") +
@@ -821,19 +827,47 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     fun clearDtcs() = prepareClear(null)
 
     /** Сохраняет отчёт; ошибка сохранения возвращается текстом, а не глотается. */
-    private fun saveReport(text: String, time: Long): Pair<SavedReport?, String?> = try {
-        history.save(text, time) to null
-    } catch (e: Exception) {
-        null to (e.message ?: e.javaClass.simpleName)
-    } finally {
-        refreshReports()
-    }
+    /**
+     * Сохраняет отчёт (не в главном потоке); ошибка сохранения возвращается текстом, а не глотается.
+     * Историю обрезает только явная настройка [keepReports] (0 — хранить всё).
+     */
+    private suspend fun saveReport(text: String, time: Long, meta: ReportMeta): Pair<SavedReport?, String?> =
+        withContext(Dispatchers.IO) {
+            try {
+                val saved = history.save(text, time, meta.copy(vin = meta.vin ?: _vehicle.value?.vin, demo = isDemo))
+                history.prune(keepReports)
+                saved to null
+            } catch (e: Exception) {
+                null to (e.message ?: e.javaClass.simpleName)
+            } finally {
+                _reports.value = listReports()
+            }
+        }
+
+    private fun listReports() = runCatching { history.list() }.getOrDefault(emptyList())
+
+    private val isDemo: Boolean get() = target == Target.Demo
+
+    /** Демо-данные помечаются в каждом отчёте: их нельзя принять за данные автомобиля. */
+    private fun demoNote(): List<String> =
+        if (isDemo) listOf("ДЕМО-РЕЖИМ: данные эмулятора, а не автомобиля.") else emptyList()
+
+    /** Сколько отчётов хранить; 0 — все (по умолчанию). Меняет только владелец в настройках. */
+    var keepReports: Int
+        get() = prefs.getInt("keepReports", 0)
+        set(v) = prefs.edit().putInt("keepReports", v.coerceAtLeast(0)).apply()
+
+    private fun metaOf(r: DtcReport, kind: String? = null, linkedTo: String? = null) =
+        ReportMeta(kind, errors = r.all.size, complete = r.isComplete && r.mismatch == null, linkedTo = linkedTo)
+
+    private fun metaOf(m: VagModuleResult, kind: String, linkedTo: String? = null) =
+        ReportMeta(kind, errors = m.dtcs.size, complete = m.responded && m.error == null, linkedTo = linkedTo)
 
     private fun reportText(r: DtcReport, kind: String, extra: List<String> = emptyList()) =
-        ReportFormatter.format(r, _vehicle.value, _conn.value as? ConnState.Connected, db, _vag.value.results, kind, extra)
+        ReportFormatter.format(r, _vehicle.value, _conn.value as? ConnState.Connected, db, _vag.value.results, kind, demoNote() + extra)
 
     private fun vagReportText(m: VagModuleResult, time: Long, kind: String, extra: List<String> = emptyList()) =
-        ReportFormatter.formatVagModule(m, time, _vehicle.value, _conn.value as? ConnState.Connected, db, kind, extra)
+        ReportFormatter.formatVagModule(m, time, _vehicle.value, _conn.value as? ConnState.Connected, db, kind, demoNote() + extra)
 
     /**
      * Шаги 1–3 сброса: актуальное чтение → отчёт «до сброса» в историю → подтверждение.
@@ -851,8 +885,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 val incomplete: List<String>
                 val permanent: Int
                 val codes: List<String>
+                val meta: ReportMeta
                 if (m == null) {
                     val r = doReadDtcs(save = false) ?: return@launchOp
+                    meta = metaOf(r, "до сброса")
                     text = reportText(r, "до сброса")
                     incomplete = r.failed.map { it.text }
                     permanent = r.permanent.size
@@ -863,12 +899,13 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                         _dtc.update { it.copy(warning = "Блок «${m.title}» сейчас не отвечает — сброс невозможен") }
                         return@launchOp
                     }
+                    meta = metaOf(fresh, "до сброса · блок ${m.addressText}")
                     text = vagReportText(fresh, now, "до сброса")
                     incomplete = listOfNotNull(fresh.error?.let { "${m.title}: $it" })
                     permanent = 0
                     codes = vagCodes(fresh)
                 }
-                val (saved, saveError) = saveReport(text, now)
+                val (saved, saveError) = saveReport(text, now, meta)
                 val scope = if (m != null) "Будут стёрты ошибки только блока «${m.title}»."
                 else if (service?.clearIsBroadcast == true) "На этом протоколе команда уйдёт всем блокам OBD, а не только двигателю."
                 else "Будут стёрты ошибки только блока двигателя; ошибки других блоков останутся."
@@ -878,7 +915,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     })
                 _dtc.update {
                     it.copy(clearPrep = ClearPrep(sid, m, if (m == null) "Сбросить ошибки двигателя?" else
-                        "Сбросить ошибки блока «${m.title}»?", lines, saved?.file?.name, codes))
+                        "Сбросить ошибки блока «${m.title}»?", lines, saved?.id, codes))
                 }
             } finally {
                 _dtc.update { it.copy(clearing = false) }
@@ -930,6 +967,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 val check: ControlRead
                 val body: String
                 var afterCodes: List<String>? = null
+                var afterMeta = ReportMeta("после сброса", complete = false, linkedTo = prep.beforeName)
                 val sameLink = session == prep.session
                 if (m == null) {
                     val r = if (sameLink) doReadDtcs(save = false) else null
@@ -939,12 +977,14 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     } ?: ControlRead(false, 0, problem = _dtc.value.error ?: "связь потеряна")
                     body = r?.let { reportText(it, "после сброса") } ?: ""
                     afterCodes = r?.let { obdCodes(it) }
+                    r?.let { afterMeta = metaOf(it, "после сброса", prep.beforeName) }
                 } else {
                     val fresh = if (sameLink) readVagModule(m) else null
                     check = fresh?.let { ControlRead(it.responded && it.error == null, it.dtcs.size, problem = it.error) }
                         ?: ControlRead(false, 0, problem = "блок не ответил")
                     body = fresh?.let { vagReportText(it, now, "после сброса") } ?: ""
                     afterCodes = fresh?.let { vagCodes(it) }
+                    fresh?.let { afterMeta = metaOf(it, "после сброса · блок ${m.addressText}", prep.beforeName) }
                 }
                 val outcome = ClearFlow.evaluate(cmd, check, afterCodes?.let { ClearFlow.compare(prep.beforeCodes, it) })
                 val link = "Связан с отчётом до сброса: " + (prep.beforeName ?: "не сохранён")
@@ -953,7 +993,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     "Отчёт диагностики · " + java.text.SimpleDateFormat("dd.MM.yyyy HH:mm", java.util.Locale("ru"))
                         .format(java.util.Date(now)) + " · после сброса\n"
                 }.let { b -> b.substringBefore("\n") + "\n" + head.joinToString("\n") + "\n" + b.substringAfter("\n", "") }
-                val (_, saveError) = saveReport(text, now)
+                // Неподтверждённый или непроверенный сброс — отчёт помечается неполным.
+                if (outcome.kind != OutcomeKind.CLEARED && outcome.kind != OutcomeKind.REMAINING) afterMeta = afterMeta.copy(complete = false)
+                val (_, saveError) = saveReport(text, now, afterMeta)
                 val shown = if (saveError == null) outcome
                 else outcome.copy(details = outcome.details + "Отчёт после сброса НЕ сохранён: $saveError")
                 _dtc.update { it.copy(outcome = shown) }
@@ -967,15 +1009,30 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     fun buildReportText(): String? {
         val r = _dtc.value.report ?: return null
-        return ReportFormatter.format(r, _vehicle.value, (_conn.value as? ConnState.Connected), db, _vag.value.results)
+        return ReportFormatter.format(r, _vehicle.value, (_conn.value as? ConnState.Connected), db, _vag.value.results,
+            extra = demoNote())
     }
 
-    /** Каждое чтение ошибок попадает в историю — форумчане жалуются, что «забыл сохранить». */
-    private fun autoSave() {
+    /**
+     * Каждое чтение ошибок попадает в историю — в том числе неполное. Ошибка сохранения
+     * показывается, а результат остаётся на экране.
+     */
+    private suspend fun autoSave() {
         val r = _dtc.value.report ?: return
         val text = buildReportText() ?: return
-        runCatching { history.save(text, r.time) }
-        refreshReports()
+        val (_, err) = saveReport(text, r.time, metaOf(r))
+        if (err != null) _dtc.update { it.copy(warning = "Отчёт не сохранён в историю: $err. Результат остаётся на экране.") }
+    }
+
+    /** Опрос блоков VAG тоже сохраняется сам — вместе с частичными результатами. */
+    private suspend fun autoSaveVag() {
+        val res = _vag.value.results
+        if (res.isEmpty()) return
+        val now = System.currentTimeMillis()
+        val text = ReportFormatter.formatVagScan(res, now, _vehicle.value, _conn.value as? ConnState.Connected, db, demoNote())
+        val meta = ReportMeta("блоки VAG", errors = res.sumOf { it.dtcs.size }, complete = res.none { it.error != null } && res.any { it.responded })
+        val (_, err) = saveReport(text, now, meta)
+        if (err != null) _vag.update { it.copy(error = "Отчёт по блокам не сохранён в историю: $err") }
     }
 
     fun shareLog(): String {
@@ -984,12 +1041,22 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun refreshReports() {
-        _reports.value = runCatching { history.list() }.getOrDefault(emptyList())
+        viewModelScope.launch(Dispatchers.IO) { _reports.value = listReports() }
     }
 
     fun deleteReport(r: SavedReport) {
-        history.delete(r)
-        refreshReports()
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching { history.delete(r) }
+            _reports.value = listReports()
+        }
+    }
+
+    /** Заметка владельца к отчёту («заменил датчик», «после мойки» и т.п.). */
+    fun setReportNote(r: SavedReport, note: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching { history.setNote(r, note) }
+            _reports.value = listReports()
+        }
     }
 
     // ---------- Готовность и информация ----------
