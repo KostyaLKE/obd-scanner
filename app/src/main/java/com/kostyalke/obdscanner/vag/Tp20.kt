@@ -22,8 +22,25 @@ class VagException(message: String, val kind: VagErrorKind = VagErrorKind.LINK) 
  */
 data class VagDtc(val code: Int, val status: Int, val uds: Boolean = false)
 
-/** Сырые идентификационные записи блока (1A xx) — основа резервной копии кодировки. */
-data class ModuleBackup(val module: VagModule, val records: Map<Int, IntArray>)
+/**
+ * Снимок служебных данных блока (записи 1A xx / DID) как есть. Это идентификация и сырые данные,
+ * а не проверенная резервная копия: полнота кодировки и восстановление не подтверждены.
+ */
+data class ModuleBackup(
+    val module: VagModule,
+    val records: Map<Int, IntArray>,
+    val protocol: String = "KWP2000",
+    val tpAddress: Int? = null,
+    /** UDS: (запрос, ответ). */
+    val canIds: Pair<Int, Int>? = null,
+    /** Какие записи запрашивали — по ним видно, что не прочиталось. */
+    val requested: List<Int> = records.keys.toList(),
+    val partNumber: String? = null,
+) {
+    val missing: List<Int> get() = requested.filter { it !in records }
+    val hasData: Boolean get() = records.isNotEmpty()
+    val complete: Boolean get() = hasData && missing.isEmpty()
+}
 
 data class VagModuleResult(
     val module: VagModule,
@@ -300,14 +317,15 @@ class Tp20(
          */
         val BACKUP_IDS = listOf(0x9B, 0x9A, 0x91, 0x86, 0x9C)
 
-        /** Резервная копия одного блока. null — блок не ответил. */
+        /** Снимок одного блока. null — блок не ответил; пустые [ModuleBackup.records] — ответил, но ничего не отдал. */
         suspend fun backupModule(tp: Tp20, m: VagModule, tpAddr: Int): ModuleBackup? {
             if (!tp.open(tpAddr)) return null
             return try {
                 tp.startSession()
+                val part = tp.partNumber()
                 val recs = LinkedHashMap<Int, IntArray>()
                 for (id in BACKUP_IDS) tp.readIdent(id)?.let { recs[id] = it }
-                ModuleBackup(m, recs)
+                ModuleBackup(m, recs, "KWP2000", tpAddress = tpAddr, requested = BACKUP_IDS, partNumber = part)
             } finally {
                 tp.close()
             }

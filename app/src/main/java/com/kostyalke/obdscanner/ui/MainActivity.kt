@@ -174,7 +174,7 @@ private fun App(vm: AppViewModel) {
                     onVagScan = vm::scanVag,
                     onVagClear = vm::clearVag,
                     onVagBackup = vm::backupVag,
-                    onShareBackup = { ctx.shareText("Резервная копия блоков", it) },
+                    onShareBackup = { ctx.shareText("Снимок данных блоков", it) },
                     onShareLog = { ctx.shareText("Отправить журнал", vm.shareLog()) },
                     onConfirmClear = vm::confirmClear,
                     onCancelClear = vm::cancelClear,

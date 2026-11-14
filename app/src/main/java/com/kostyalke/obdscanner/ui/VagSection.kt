@@ -99,7 +99,7 @@ fun VagSection(
             }
             if (st.backingUp) {
                 Column(Modifier.padding(16.dp)) {
-                    Text("Сохраняю копию: ${st.current ?: "…"}", style = MaterialTheme.typography.bodyMedium,
+                    Text("Сохраняю снимок: ${st.current ?: "…"}", style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurface)
                     Spacer(Modifier.size(8.dp))
                     LinearProgressIndicator(Modifier.fillMaxWidth())
@@ -118,7 +118,7 @@ fun VagSection(
                     if (st.results.any { it.responded }) {
                         OutlinedButton(onClick = onBackup, contentPadding = ButtonPadding,
                             modifier = Modifier.heightIn(min = 44.dp)) {
-                            Text("Сохранить копию")
+                            Text("Сохранить снимок")
                         }
                     }
                 }
@@ -134,13 +134,13 @@ fun VagSection(
             StatusNote(info, Status.colors.ok, Icons.Filled.CheckCircle,
                 "Отправьте файл разработчику — по нему настроим кодирование под вашу машину.", compact = true)
             st.backupJson?.let { json ->
-                TextButton(onClick = { onShareBackup(json) }) { Text("Поделиться копией") }
+                TextButton(onClick = { onShareBackup(json) }) { Text("Поделиться снимком") }
             }
         }
         if (st.results.any { it.responded } && st.backupInfo == null && !st.scanning) {
             Text(
-                "«Сохранить копию» читает служебные данные блоков (кодировку) — только чтение, ничего не меняет. " +
-                    "Копия нужна, чтобы позже безопасно включать функции и откатывать изменения.",
+                "«Сохранить снимок» читает служебные данные блоков (номера, версии, кодировку) — только чтение, " +
+                    "ничего не меняет. Это снимок для идентификации блоков; восстановить по нему настройки пока нельзя.",
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(start = 4.dp, end = 4.dp, top = 8.dp),
             )

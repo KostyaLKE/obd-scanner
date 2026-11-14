@@ -148,7 +148,8 @@ class Uds(private val send: suspend (String, Long) -> ElmReply) {
             uds.target(tx, rx)
             val recs = LinkedHashMap<Int, IntArray>()
             for (did in BACKUP_DIDS) uds.readRaw(did)?.let { recs[did] = it }
-            return if (recs.isEmpty()) null else ModuleBackup(m, recs)
+            val part = recs[0xF187]?.takeWhile { it in 0x20..0x7E }?.map { it.toChar() }?.joinToString("")?.trim()?.ifEmpty { null }
+            return ModuleBackup(m, recs, "UDS", canIds = tx to rx, requested = BACKUP_DIDS, partNumber = part)
         }
     }
 }

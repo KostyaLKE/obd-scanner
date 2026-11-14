@@ -110,7 +110,7 @@ data class VagState(
     val error: String? = null,
     val clearing: Int? = null,
     val backingUp: Boolean = false,
-    /** Текст последней сохранённой копии (JSON) — для «Поделиться». */
+    /** Текст последнего снимка данных блоков (JSON) — для «Поделиться». */
     val backupJson: String? = null,
     val backupInfo: String? = null,
 )
@@ -201,7 +201,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
      */
     private var sessionScope: CoroutineScope? = null
 
-    /** Одна диагностическая операция за раз: чтение, сброс, VAG, копия, ручные команды. */
+    /** Одна диагностическая операция за раз: чтение, сброс, VAG, снимок, ручные команды. */
     private val opLock = Mutex()
 
     /**
@@ -617,8 +617,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     private val backups by lazy { com.kostyalke.obdscanner.data.BackupStore(getApplication()) }
 
     /**
-     * Резервная копия служебных данных всех ответивших блоков (только чтение).
-     * Нужна до любого кодирования: из неё можно вернуть всё как было.
+     * Снимок служебных данных всех ответивших блоков (только чтение): номера, версии, сырые записи.
+     * Не проверенная резервная копия — восстановление по нему не подтверждено.
      */
     fun backupVag() {
         val st = _vag.value
@@ -629,6 +629,14 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         launchOp {
             _vag.update { it.copy(backingUp = true, error = null, backupInfo = null) }
             try {
+                val failed = ArrayList<Pair<VagModule, String>>()
+                // Ошибки протокола одного блока — в список «не прочитан»; обрыв связи — наверх.
+                suspend fun one(m: VagModule, read: suspend () -> com.kostyalke.obdscanner.vag.ModuleBackup?) =
+                    try {
+                        read().also { if (it == null) failed += m to "блок не ответил" }
+                    } catch (e: VagException) {
+                        failed += m to (e.message ?: e.kind.label); null
+                    }
                 val list = withService { s ->
                     s.elm.exclusive { send ->
                         val out = ArrayList<com.kostyalke.obdscanner.vag.ModuleBackup>()
@@ -638,9 +646,11 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                                 tp.enterRawMode()
                                 targets.forEach { (m, tpA) ->
                                     _vag.update { it.copy(current = m.title) }
-                                    catching { Tp20.backupModule(tp, m, tpA) }.getOrNull()?.let { out += it }
+                                    one(m) { Tp20.backupModule(tp, m, tpA) }?.let { out += it }
                                 }
-                            } catch (_: VagException) {
+                            } catch (e: VagException) {
+                                targets.filter { (m, _) -> out.none { it.module == m } && failed.none { it.first == m } }
+                                    .forEach { (m, _) -> failed += m to (e.message ?: "TP2.0 недоступен") }
                             } finally {
                                 if (!tp.restore()) adapterDirty = true
                             }
@@ -651,7 +661,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                                 uds.begin()
                                 udsTargets.forEach { m ->
                                     _vag.update { it.copy(current = m.title) }
-                                    catching { com.kostyalke.obdscanner.vag.Uds.backupModule(uds, m) }.getOrNull()?.let { out += it }
+                                    one(m) { com.kostyalke.obdscanner.vag.Uds.backupModule(uds, m) }?.let { out += it }
                                 }
                             } finally {
                                 if (!uds.restore()) adapterDirty = true
@@ -660,21 +670,27 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                         out
                     }
                 } ?: return@launchOp
-                if (list.isEmpty()) throw VagException("Ни один блок не отдал данные")
+                // Блок ответил, но не отдал ни одной записи — это не успех.
+                list.filter { !it.hasData }.forEach { failed += it.module to "ни одной записи не прочитано" }
+                val withData = list.filter { it.hasData }
+                if (withData.isEmpty()) throw VagException("ни один блок не отдал данные")
                 val time = System.currentTimeMillis()
-                val vin = _vehicle.value?.vin
-                val file = backups.save(list, vin, time)
+                val file = backups.save(withData, _vehicle.value?.vin, time, versionName, failed)
+                val fullCount = withData.count { it.complete }
                 _vag.update {
                     it.copy(
                         backupJson = file.readText(),
-                        backupInfo = "Копия сохранена: ${list.size} ${plural(list.size, "блок", "блока", "блоков")}, " +
-                            "${list.sumOf { b -> b.records.size }} записей",
+                        backupInfo = "Снимок данных блоков сохранён: полностью — $fullCount, " +
+                            "частично — ${withData.size - fullCount}, не прочитаны — ${failed.size}" +
+                            (if (failed.isNotEmpty()) " (" + failed.joinToString(", ") { f -> f.first.title } + ")" else "") +
+                            (if (_vehicle.value?.vin == null) ". VIN не прочитан" else "") +
+                            ". Это снимок для идентификации, а не проверенная резервная копия.",
                     )
                 }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                _vag.update { it.copy(error = "Копия не сохранена: ${e.message ?: e.javaClass.simpleName}") }
+                _vag.update { it.copy(error = "Снимок не сохранён: ${e.message ?: e.javaClass.simpleName}") }
             } finally {
                 _vag.update { it.copy(backingUp = false, current = null) }
             }
