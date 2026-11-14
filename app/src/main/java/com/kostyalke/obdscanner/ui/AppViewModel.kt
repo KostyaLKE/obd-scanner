@@ -140,6 +140,8 @@ data class ClearPrep(
     val lines: List<String>,
     /** Имя файла отчёта «до сброса»; null — сохранить не удалось. */
     val beforeName: String?,
+    /** Коды до сброса — для сравнения «исчезли / остались / появились». */
+    val beforeCodes: List<String> = emptyList(),
 )
 
 class AppViewModel(app: Application) : AndroidViewModel(app) {
@@ -848,11 +850,13 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 val text: String
                 val incomplete: List<String>
                 val permanent: Int
+                val codes: List<String>
                 if (m == null) {
                     val r = doReadDtcs(save = false) ?: return@launchOp
                     text = reportText(r, "до сброса")
                     incomplete = r.failed.map { it.text }
                     permanent = r.permanent.size
+                    codes = obdCodes(r)
                 } else {
                     val fresh = readVagModule(m)
                     if (fresh == null || !fresh.responded) {
@@ -862,15 +866,19 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     text = vagReportText(fresh, now, "до сброса")
                     incomplete = listOfNotNull(fresh.error?.let { "${m.title}: $it" })
                     permanent = 0
+                    codes = vagCodes(fresh)
                 }
                 val (saved, saveError) = saveReport(text, now)
-                val lines = ClearFlow.confirmLines(incomplete, saved?.title, saveError, permanent) +
+                val scope = if (m != null) "Будут стёрты ошибки только блока «${m.title}»."
+                else if (service?.clearIsBroadcast == true) "На этом протоколе команда уйдёт всем блокам OBD, а не только двигателю."
+                else "Будут стёрты ошибки только блока двигателя; ошибки других блоков останутся."
+                val lines = listOf(scope) + ClearFlow.confirmLines(incomplete, saved?.title, saveError, permanent) +
                     listOfNotNull(m?.let {
                         "Ошибки подушек безопасности с записью об аварии (crash data) так не сбрасываются."
                     })
                 _dtc.update {
-                    it.copy(clearPrep = ClearPrep(sid, m, if (m == null) "Сбросить ошибки?" else
-                        "Сбросить ошибки блока «${m.title}» (${m.addressText})?", lines, saved?.file?.name))
+                    it.copy(clearPrep = ClearPrep(sid, m, if (m == null) "Сбросить ошибки двигателя?" else
+                        "Сбросить ошибки блока «${m.title}»?", lines, saved?.file?.name, codes))
                 }
             } finally {
                 _dtc.update { it.copy(clearing = false) }
@@ -880,6 +888,11 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun cancelClear() = _dtc.update { it.copy(clearPrep = null) }
+
+    private fun obdCodes(r: DtcReport) = r.all.map { "${it.code} (${it.ecu})" }.distinct()
+
+    private fun vagCodes(m: VagModuleResult) =
+        m.dtcs.map { if (it.uds) "%06X".format(it.code) else VagModules.format(it.code) }
 
     /**
      * Шаги 4–7: одна команда сброса → контрольное чтение → связанный отчёт «после» →
@@ -916,6 +929,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 val now = System.currentTimeMillis()
                 val check: ControlRead
                 val body: String
+                var afterCodes: List<String>? = null
                 val sameLink = session == prep.session
                 if (m == null) {
                     val r = if (sameLink) doReadDtcs(save = false) else null
@@ -924,13 +938,15 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                             it.failed.joinToString("; ") { f -> f.text }.ifEmpty { null })
                     } ?: ControlRead(false, 0, problem = _dtc.value.error ?: "связь потеряна")
                     body = r?.let { reportText(it, "после сброса") } ?: ""
+                    afterCodes = r?.let { obdCodes(it) }
                 } else {
                     val fresh = if (sameLink) readVagModule(m) else null
                     check = fresh?.let { ControlRead(it.responded && it.error == null, it.dtcs.size, problem = it.error) }
                         ?: ControlRead(false, 0, problem = "блок не ответил")
                     body = fresh?.let { vagReportText(it, now, "после сброса") } ?: ""
+                    afterCodes = fresh?.let { vagCodes(it) }
                 }
-                val outcome = ClearFlow.evaluate(cmd, check)
+                val outcome = ClearFlow.evaluate(cmd, check, afterCodes?.let { ClearFlow.compare(prep.beforeCodes, it) })
                 val link = "Связан с отчётом до сброса: " + (prep.beforeName ?: "не сохранён")
                 val head = listOf(link, "Итог сброса: ${outcome.title}") + outcome.details
                 val text = body.ifEmpty {

@@ -141,4 +141,38 @@ class ClearFlowTest {
         assertTrue(text.contains("Постоянн"))
         assertTrue(!text.contains("уже сохранён"))
     }
+
+    // ---- Только двигатель и сравнение ----
+
+    @Test
+    fun clearGoesToEngineOnlyOnCan() {
+        val (r, t) = clear("7E8 01 44")
+        assertEquals(ClearStatus.CONFIRMED, r.status)
+        val i = t.sent.indexOf("04")
+        assertEquals("ATSH7E0", t.sent[i - 1])
+        assertEquals("заголовок не возвращён к общему", "ATSH7DF", t.sent[i + 1])
+    }
+
+    @Test
+    fun clearNotSentIfEngineAddressRejected() {
+        val t = Scripted(mapOf("ATSH7E0" to "?", "04" to "7E8 01 44"))
+        val r = runBlocking {
+            val elm = Elm327(t) {}
+            elm.initialize('6') {}
+            ObdService(elm).clearDtcs()
+        }
+        assertEquals(ClearStatus.NOT_CONFIRMED, r.status)
+        assertTrue("сброс ушёл на общий адрес", "04" !in t.sent)
+    }
+
+    @Test
+    fun compareShowsGoneStayedNew() {
+        val c = ClearFlow.compare(listOf("P0401", "P1557"), listOf("P1557", "P0234"))
+        assertEquals(listOf("P0401"), c.gone)
+        assertEquals(listOf("P1557"), c.stayed)
+        assertEquals(listOf("P0234"), c.appeared)
+        val o = ClearFlow.evaluate(ok, ControlRead(verified = true, remaining = 2), c)
+        assertTrue(o.details.any { it.contains("Исчезли: P0401") })
+        assertTrue(o.details.any { it.contains("Появились: P0234") })
+    }
 }

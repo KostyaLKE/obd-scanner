@@ -150,11 +150,11 @@ fun ErrorsContent(
                 OutlinedButton(
                     onClick = onClear,
                     enabled = !busy,
-                    modifier = Modifier.heightIn(min = 48.dp),
+                    modifier = Modifier.weight(1f).heightIn(min = 48.dp),
                     contentPadding = ButtonPadding,
                     colors = ButtonDefaults.outlinedButtonColors(contentColor = Status.colors.error.accent),
                     border = BorderStroke(1.dp, Status.colors.error.accent.copy(alpha = if (busy) 0.3f else 0.7f)),
-                ) { Text("Сбросить ошибки", maxLines = 1, overflow = TextOverflow.Ellipsis) }
+                ) { Text("Сбросить ошибки двигателя", textAlign = androidx.compose.ui.text.style.TextAlign.Center) }
             }
         }
     }

@@ -23,6 +23,9 @@ data class ControlRead(
     val problem: String? = null,
 )
 
+/** Коды до и после сброса. */
+data class CodeDiff(val gone: List<String>, val stayed: List<String>, val appeared: List<String>)
+
 enum class OutcomeKind { CLEARED, CLEARED_UNCONFIRMED, REMAINING, NOT_CLEARED, UNVERIFIED }
 
 data class ClearOutcome(val kind: OutcomeKind, val title: String, val details: List<String>)
@@ -33,7 +36,13 @@ object ClearFlow {
     private const val PERMANENT_NOTE =
         "Постоянные ошибки сканер не стирает: блок удалит их сам после нескольких поездок без неисправности."
 
-    fun evaluate(cmd: ClearResult, check: ControlRead): ClearOutcome {
+    fun compare(before: List<String>, after: List<String>): CodeDiff {
+        val b = before.distinct()
+        val a = after.distinct()
+        return CodeDiff(b.filter { it !in a }, b.filter { it in a }, a.filter { it !in b })
+    }
+
+    fun evaluate(cmd: ClearResult, check: ControlRead, diff: CodeDiff? = null): ClearOutcome {
         val details = buildList {
             add("Команда: ${cmd.text}")
             add("Контрольное чтение: " + when {
@@ -41,6 +50,12 @@ object ClearFlow {
                 check.remaining == 0 -> "ошибок нет"
                 else -> "ошибок ${check.remaining}"
             })
+            // Сравнение — только по достоверному контрольному чтению.
+            if (diff != null && check.verified) {
+                if (diff.gone.isNotEmpty()) add("Исчезли: " + diff.gone.joinToString(", "))
+                if (diff.stayed.isNotEmpty()) add("Остались: " + diff.stayed.joinToString(", "))
+                if (diff.appeared.isNotEmpty()) add("Появились: " + diff.appeared.joinToString(", "))
+            }
             if (check.permanentLeft > 0) add(PERMANENT_NOTE)
         }
         val confirmed = cmd.status == ClearStatus.CONFIRMED || cmd.status == ClearStatus.PARTIAL
@@ -48,7 +63,7 @@ object ClearFlow {
             check.remaining > 0 && !confirmed -> ClearOutcome(OutcomeKind.NOT_CLEARED, "Ошибки не стёрты", details)
             check.remaining > 0 -> ClearOutcome(OutcomeKind.REMAINING,
                 "Ошибки остались или сразу вернулись: ${check.remaining}", details)
-            !check.verified -> ClearOutcome(OutcomeKind.UNVERIFIED, "Результат сброса проверить не удалось", details)
+            !check.verified -> ClearOutcome(OutcomeKind.UNVERIFIED, "Результат сброса не проверен", details)
             confirmed -> ClearOutcome(OutcomeKind.CLEARED,
                 if (cmd.status == ClearStatus.PARTIAL) "Ошибок нет, но часть блоков отказала" else "Сброс подтверждён, ошибок нет",
                 details)

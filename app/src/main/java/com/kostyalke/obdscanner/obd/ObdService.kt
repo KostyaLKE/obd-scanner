@@ -4,6 +4,9 @@ import com.kostyalke.obdscanner.elm.Elm327
 import com.kostyalke.obdscanner.elm.ElmReply
 import com.kostyalke.obdscanner.elm.catching
 import com.kostyalke.obdscanner.elm.ElmTimeoutException
+import com.kostyalke.obdscanner.elm.catching
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withContext
 
 class ObdException(message: String) : Exception(message)
 
@@ -205,6 +208,22 @@ class ObdService(val elm: Elm327) {
      * пробрасываются: вызывающий обязан считать результат неизвестным, а не повторять.
      */
     suspend fun clearDtcs(): ClearResult {
+        // CAN 11 бит: только блоку двигателя (7E0), а не всем блокам OBD через 7DF.
+        val engineOnly = protocol.isCan && !protocol.is29bit
+        if (engineOnly && elm.send("ATSH7E0", 2000).lines.none { it.equals("OK", true) }) {
+            return ClearResult(ClearStatus.NOT_CONFIRMED, "адаптер не принял адрес двигателя — команда не отправлена")
+        }
+        try {
+            return clearReply()
+        } finally {
+            if (engineOnly) withContext(NonCancellable) { catching { elm.send("ATSH7DF", 2000) } }
+        }
+    }
+
+    /** true — сброс уйдёт всем блокам OBD (K-line, CAN 29 бит), а не только двигателю. */
+    val clearIsBroadcast: Boolean get() = !(protocol.isCan && !protocol.is29bit)
+
+    private suspend fun clearReply(): ClearResult {
         val (reply, msgs) = query("04", 10000)
         val pos = msgs.forService(4)
         val neg = msgs.filter { it.data.size >= 3 && it.data[0] == 0x7F && it.data[1] == 0x04 }
