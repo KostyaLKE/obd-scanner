@@ -152,4 +152,12 @@ class DtcReadTest {
         assertEquals(listOf("P0101"), r.stored.map { it.code })
         assertTrue(r.failed.any { it.status == ReadStatus.CORRUPT && it.ecu!!.contains("7E9") })
     }
+
+    @Test
+    fun allServicesUnsupportedIsNotNoErrors() {
+        // Ни один вид ошибок не прочитан — это не «Ошибок нет».
+        val r = read("03" to "7E8 03 7F 03 11", "07" to "7E8 03 7F 07 11", "0A" to "7E8 03 7F 0A 11")
+        assertFalse(r.isComplete)
+        assertTrue(r.failed.any { it.kind == DtcKind.STORED })
+    }
 }

@@ -1,7 +1,6 @@
 package com.kostyalke.obdscanner.vag
 
 import com.kostyalke.obdscanner.elm.ElmReply
-import com.kostyalke.obdscanner.elm.catching
 
 /**
  * Опрос всех блоков VAG: сначала TP2.0/KWP2000, затем UDS для промолчавших.
@@ -60,7 +59,9 @@ object VagScanner {
                 uds.begin()
                 silent.forEachIndexed { i, r ->
                     progress("${r.module.title} (UDS)", 0.6f + 0.4f * i / silent.size)
-                    val u = catching { Uds.scanModule(uds, r.module) }.getOrNull()
+                    // Ошибки блока scanModule отдаёт в результате; обрыв связи (IOException) — наверх,
+                    // чтобы не выдать его за «блок не ответил».
+                    val u = Uds.scanModule(uds, r.module)
                     if (u != null) {
                         val idx = merged.indexOfFirst { it.module.address == u.module.address }
                         if (idx >= 0) merged[idx] = u

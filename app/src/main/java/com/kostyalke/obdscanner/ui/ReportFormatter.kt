@@ -72,7 +72,7 @@ object ReportFormatter {
             for (m in vag.filter { it.responded }) {
                 val head = "  ${m.module.addressText} ${m.module.title}" + (m.partNumber?.let { " ($it)" } ?: "")
                 appendLine(head + ": " + when {
-                    m.error != null -> "ошибка связи — ${m.error}"
+                    m.error != null -> "${m.errorKind?.label ?: "сбой обмена"} — ${m.error}"
                     m.dtcs.isEmpty() -> "ошибок нет"
                     else -> "ошибок ${m.dtcs.size}"
                 })

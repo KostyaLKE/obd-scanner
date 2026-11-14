@@ -30,12 +30,21 @@ data class DtcReport(
     }
 
     /** Запросы, которые не дали достоверного ответа. */
-    val failed: List<DtcRead> get() = reads.filter {
-        it.status != ReadStatus.OK && it.status != ReadStatus.SKIPPED && it.status != ReadStatus.NOT_SUPPORTED
+    val failed: List<DtcRead> get() {
+        // «Не поддерживается» — не сбой для необязательных запросов (07, 0A), но сохранённые
+        // ошибки (03) должны быть прочитаны хотя бы одним блоком, иначе «Ошибок нет» недостоверно.
+        val storedOk = reads.any { it.kind == DtcKind.STORED && it.status == ReadStatus.OK }
+        return reads.filter {
+            when (it.status) {
+                ReadStatus.OK, ReadStatus.SKIPPED -> false
+                ReadStatus.NOT_SUPPORTED -> it.kind == DtcKind.STORED && !storedOk
+                else -> true
+            }
+        }
     }
 
     /** Блок ответил «сервис не поддерживается» — это не сбой, но показываем. */
-    val unsupported: List<DtcRead> get() = reads.filter { it.status == ReadStatus.NOT_SUPPORTED }
+    val unsupported: List<DtcRead> get() = reads.filter { it.status == ReadStatus.NOT_SUPPORTED && it !in failed }
 
     val isComplete: Boolean get() = failed.isEmpty()
 

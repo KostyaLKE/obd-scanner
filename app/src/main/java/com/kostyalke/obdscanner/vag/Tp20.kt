@@ -6,8 +6,15 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import com.kostyalke.obdscanner.elm.catching
 
+/** Чем вызвана ошибка блока — в интерфейсе это разные случаи. */
+enum class VagErrorKind(val label: String) {
+    REFUSED("блок отказал"),
+    ADAPTER("ошибка адаптера"),
+    LINK("сбой обмена"),
+}
+
 /** Ошибка протокола VAG. Не IOException: это не обрыв Bluetooth, переподключаться не нужно. */
-class VagException(message: String) : Exception(message)
+class VagException(message: String, val kind: VagErrorKind = VagErrorKind.LINK) : Exception(message)
 
 /**
  * Ошибка блока. KWP2000: [code] — 5-значный код VAG (00283).
@@ -25,6 +32,7 @@ data class VagModuleResult(
     val dtcs: List<VagDtc>,
     val responded: Boolean,
     val error: String? = null,
+    val errorKind: VagErrorKind? = null,
     /** Каким протоколом удалось связаться: «KWP2000» (TP2.0) или «UDS». */
     val protocol: String = "KWP2000",
     /** Логический адрес TP2.0, по которому блок ответил (для сброса и копии). */
@@ -65,14 +73,14 @@ class Tp20(
         catching { send(cmd, 2000).lines.any { it.equals("OK", true) } }.getOrDefault(false)
 
     private suspend fun at(cmd: String) {
-        if (!tryAt(cmd)) throw VagException("Адаптер не принял $cmd")
+        if (!tryAt(cmd)) throw VagException("Адаптер не принял $cmd", VagErrorKind.ADAPTER)
     }
 
     /** Фильтр приёма: ATCRA, а если клон его не знает — ATCF + ATCM. */
     private suspend fun filter(id: Int) {
         if (tryAt("ATCRA%03X".format(id))) return
         if (tryAt("ATCF%03X".format(id)) && tryAt("ATCM7FF")) return
-        throw VagException("Адаптер не умеет фильтровать CAN-кадры (ATCRA/ATCF)")
+        throw VagException("Адаптер не умеет фильтровать CAN-кадры (ATCRA/ATCF)", VagErrorKind.ADAPTER)
     }
 
     /** Кадры от блока: (CAN-ID, байты данных). */
@@ -133,8 +141,10 @@ class Tp20(
         tryAt("ATST19")
         // Суффикс «1» — ждать один ответ: ELM вернётся сразу, не дожидаясь тишины на шине.
         val r = send(hex(tpAddr, 0xC0, 0x00, 0x10, 0x00, 0x03, 0x01) + "1", 3000)
+        // Ошибка адаптера/шины — это не «блок не ответил».
+        if (!r.isNoData) r.error?.let { throw VagException("Ошибка адаптера: $it", VagErrorKind.ADAPTER) }
         val resp = frames(r, 0x200 + tpAddr).firstOrNull { it.size >= 6 } ?: return false
-        if (resp[1] != 0xD0) throw VagException("Блок отказал в открытии канала (0x%02X)".format(resp[1]))
+        if (resp[1] != 0xD0) throw VagException("Блок отказал в открытии канала (0x%02X)".format(resp[1]), VagErrorKind.REFUSED)
         rxId = resp[2] or ((resp[3] and 0x0F) shl 8)
         txId = resp[4] or ((resp[5] and 0x0F) shl 8)
         seqOut = 0
@@ -203,7 +213,7 @@ class Tp20(
                         reply = send("A3", 1500)
                         return@repeat
                     }
-                    throw VagException("Блок ответил отказом (код 0x%02X)".format(msg[2]))
+                    throw VagException("Блок ответил отказом (код 0x%02X)".format(msg[2]), VagErrorKind.REFUSED)
                 }
                 return msg
             }
@@ -305,7 +315,7 @@ class Tp20(
             val opened = try {
                 tp.open(tpAddr)
             } catch (e: VagException) {
-                return VagModuleResult(m, null, emptyList(), responded = true, error = e.message, tpAddress = tpAddr)
+                return VagModuleResult(m, null, emptyList(), responded = true, error = e.message, errorKind = e.kind, tpAddress = tpAddr)
             }
             if (!opened) return VagModuleResult(m, null, emptyList(), responded = false)
             return try {
@@ -314,7 +324,7 @@ class Tp20(
                 val dtcs = tp.readDtcs()
                 VagModuleResult(m, part, dtcs, responded = true, tpAddress = tpAddr)
             } catch (e: VagException) {
-                VagModuleResult(m, null, emptyList(), responded = true, error = e.message, tpAddress = tpAddr)
+                VagModuleResult(m, null, emptyList(), responded = true, error = e.message, errorKind = e.kind, tpAddress = tpAddr)
             } finally {
                 tp.close()
             }

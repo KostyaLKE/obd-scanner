@@ -38,6 +38,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -182,11 +183,28 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     /** Одна диагностическая операция за раз: чтение, сброс, VAG, копия, ручные команды. */
     private val opLock = Mutex()
 
+    /**
+     * Шина адаптера: операция держит её целиком, опрос датчиков берёт на каждый запрос.
+     * Так датчики не вклиниваются между командами операции, а операция ждёт не дольше одного PID.
+     */
+    private val busLock = Mutex()
+
     /** Запускает операцию в задачах подключения. false — нет связи или идёт другая операция. */
     private fun launchOp(block: suspend CoroutineScope.() -> Unit): Boolean {
         val scope = sessionScope ?: return false
         if (!opLock.tryLock()) return false
-        scope.launch(block = block).invokeOnCompletion { opLock.unlock() }
+        val sid = session
+        scope.launch {
+            adapterDirty = false
+            val op = this
+            try {
+                busLock.withLock { op.block() }
+            } finally {
+                // ELM не вернулся к OBD — переинициализация и при ошибке операции,
+                // но только если это всё ещё то же подключение.
+                if (adapterDirty && sid == session && service != null) reinitAdapter() else adapterDirty = false
+            }
+        }.invokeOnCompletion { opLock.unlock() }
         return true
     }
 
@@ -553,15 +571,14 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                         })
                         if (res.none { it.responded }) {
                             _vag.update {
-                                it.copy(error = "Ни один блок не ответил ни по TP2.0, ни по UDS. Скорее всего, адаптер не " +
-                                    "поддерживает опрос блоков VAG (нужен «сырой» CAN: ATPB/ATSP B или ATCAF0+ATV1, " +
-                                    "фильтр ATCRA) — у дешёвых клонов так бывает. Пришлите журнал обмена: по нему видно точно.")
+                                it.copy(error = "Ни один блок не ответил ни по TP2.0, ни по UDS. Причина может быть в адаптере " +
+                                    "(дешёвые клоны часто не умеют «сырой» CAN: ATPB/ATSP B или ATCAF0+ATV1, фильтр ATCRA), " +
+                                    "в выключенном зажигании или в самой машине. Точно видно по журналу обмена — пришлите его.")
                             }
                         }
                     }
                 }
                 _vag.update { it.copy(time = System.currentTimeMillis()) }
-                if (adapterDirty) reinitAdapter()
             } catch (e: CancellationException) {
                 throw e
             } catch (e: VagException) {
@@ -620,7 +637,6 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                         out
                     }
                 } ?: return@launchOp
-                if (adapterDirty) reinitAdapter()
                 if (list.isEmpty()) throw VagException("Ни один блок не отдал данные")
                 val time = System.currentTimeMillis()
                 val vin = _vehicle.value?.vin
@@ -684,7 +700,6 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 if (fresh != null) _vag.update { st ->
                     st.copy(results = st.results.map { if (it.module.address == m.address) fresh else it })
                 }
-                if (adapterDirty) reinitAdapter()
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -834,12 +849,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         if (liveJob?.isActive == true || service == null) return
         val scope = sessionScope ?: return
         liveJob = scope.launch {
-            if (_live.value.supported.isEmpty()) loadSupported()
+            if (_live.value.supported.isEmpty()) busLock.withLock { loadSupported() }
             while (isActive && service != null) {
-                // Пока идёт операция (чтение, сброс, VAG…), датчики не опрашиваем.
-                if (opLock.isLocked) {
-                    delay(200); continue
-                }
                 val st = _live.value
                 val list = if (st.onlyFavorites && st.favorites.isNotEmpty()) {
                     st.supported.filter { it.pid in st.favorites }
@@ -851,7 +862,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 for (def in list) {
                     if (!isActive) break
                     val v = try {
-                        withService { it.readPid(def) } ?: continue
+                        // Если идёт операция (чтение, сброс, VAG…) — ждём её конца.
+                        busLock.withLock { withService { it.readPid(def) } } ?: continue
                     } catch (e: CancellationException) {
                         throw e
                     } catch (e: Exception) {

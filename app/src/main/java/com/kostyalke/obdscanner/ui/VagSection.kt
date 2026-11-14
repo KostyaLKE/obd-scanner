@@ -183,7 +183,7 @@ private fun VagRow(r: VagModuleResult, dtcText: (com.kostyalke.obdscanner.vag.Va
                 modifier = Modifier.weight(1f))
             Spacer(Modifier.width(8.dp))
             when {
-                r.error != null -> StatusPill("нет связи", tone, AppIcons.Error)
+                r.error != null -> StatusPill(r.errorKind?.label ?: "сбой обмена", tone, AppIcons.Error)
                 r.dtcs.isEmpty() -> StatusPill("ок", tone, Icons.Filled.CheckCircle)
                 else -> StatusPill("${r.dtcs.size} ${plural(r.dtcs.size, "ошибка", "ошибки", "ошибок")}", tone, AppIcons.Error)
             }
